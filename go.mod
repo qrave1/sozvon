@@ -6,6 +6,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/pion/turn/v3 v3.0.3
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

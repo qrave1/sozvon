@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Sozvon — групповые созвоны</title>
+  <title>Sozvon</title>
   <style>
     * { box-sizing: border-box; }
     body {
@@ -70,29 +70,52 @@
       padding: 2px 8px;
       border-radius: 4px;
     }
+    .tile .label .mic-off {
+      margin-left: 4px;
+      opacity: .9;
+    }
+    .avatar {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 48px;
+      font-weight: 700;
+      color: #fff;
+    }
     .controls { padding: 0 16px 16px; display: flex; gap: 8px; flex-wrap: wrap; }
   </style>
 </head>
 <body x-data="callApp()" x-init="init()">
   <header>
+    <input x-model="name" placeholder="Ваше имя" :disabled="connected" />
     <input x-model="room" placeholder="ID комнаты" :disabled="connected" />
     <button x-show="!connected" @click="join()">Войти</button>
     <button class="danger" x-show="connected" @click="leave()">Выйти</button>
-    <button :class="micOn ? '' : 'off'" x-text="micOn ? 'Микрофон: вкл' : 'Микрофон: выкл'" @click="toggleMic()"></button>
-    <button :class="camOn ? '' : 'off'" x-text="camOn ? 'Камера: вкл' : 'Камера: выкл'" @click="toggleCam()"></button>
+    <button :class="micOn ? '' : 'off'" x-text="micOn ? 'Микрофон: вкл' : 'Микрофон: выкл'" @click="toggleMic()" :disabled="!localStream"></button>
+    <button :class="camOn ? '' : 'off'" x-text="camOn ? 'Камера: вкл' : 'Камера: выкл'" @click="toggleCam()" :disabled="!localStream"></button>
     <span id="status" x-text="status"></span>
   </header>
 
   <div id="videos">
-    <div class="tile" x-show="localStream">
-      <video id="vid-local" autoplay playsinline muted></video>
-      <div class="label">я</div>
+      <div class="tile" x-show="localStream">
+      <video id="vid-local" autoplay playsinline muted x-show="camOn"></video>
+      <div class="avatar" x-show="!camOn" :style="'background:' + myColor" x-text="initial"></div>
+      <div class="label">
+        <span x-text="name || 'я'"></span>
+        <span class="mic-off" x-show="!micOn" title="микрофон выключен">🔇</span>
+      </div>
     </div>
 
     <template x-for="p in peers" :key="p.id">
       <div class="tile">
-        <video :id="'vid-' + p.id" autoplay playsinline></video>
-        <div class="label" x-text="p.id.slice(0, 8)"></div>
+        <video :id="'vid-' + p.id" autoplay playsinline x-show="p.camOn"></video>
+        <div class="avatar" x-show="!p.camOn" :style="'background:' + p.color" x-text="p.initial"></div>
+        <div class="label">
+          <span x-text="p.name || p.id.slice(0, 8)"></span>
+          <span class="mic-off" x-show="!p.micOn" title="микрофон выключен">🔇</span>
+        </div>
         <div class="badge" x-show="p.mode" x-text="p.mode"></div>
       </div>
     </template>

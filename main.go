@@ -6,12 +6,14 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/pion/turn/v3"
+	"gopkg.in/yaml.v3"
 )
 
 type Message struct {
@@ -26,6 +28,10 @@ type Client struct {
 	ID   string
 	Conn *websocket.Conn
 	Room *Room
+
+	Name  string
+	CamOn bool
+	MicOn bool
 
 	Send chan Message
 
@@ -121,6 +127,20 @@ func (r *Room) ListClients(except string) []string {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+func (r *Room) ListClientsInfo(except string) []PeerInfo {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	infos := make([]PeerInfo, 0, len(r.Clients))
+	for id, client := range r.Clients {
+		if id == except {
+			continue
+		}
+		infos = append(infos, client.peerInfo())
+	}
+	return infos
 }
 
 func (r *Room) IsEmpty() bool {
@@ -251,6 +271,9 @@ func (s *Server) readLoop(c *Client) {
 		case "join":
 			s.handleJoin(c, msg)
 
+		case "state":
+			s.handleState(c, msg)
+
 		case "offer":
 			s.forward(c, msg)
 
@@ -266,6 +289,20 @@ func (s *Server) readLoop(c *Client) {
 	}
 }
 
+type PeerInfo struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	CamOn bool   `json:"camOn"`
+	MicOn bool   `json:"micOn"`
+	Info  string `json:"info,omitempty"`
+}
+
+func (c *Client) peerInfo() PeerInfo {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return PeerInfo{ID: c.ID, Name: c.Name, CamOn: c.CamOn, MicOn: c.MicOn}
+}
+
 func (s *Server) handleJoin(c *Client, msg Message) {
 	if msg.Room == "" {
 		return
@@ -274,12 +311,27 @@ func (s *Server) handleJoin(c *Client, msg Message) {
 		return
 	}
 
+	var info struct {
+		Name  string `json:"name"`
+		CamOn bool   `json:"camOn"`
+		MicOn bool   `json:"micOn"`
+	}
+	if len(msg.Data) > 0 {
+		_ = json.Unmarshal(msg.Data, &info)
+	}
+
+	c.mu.Lock()
+	c.Name = info.Name
+	c.CamOn = info.CamOn
+	c.MicOn = info.MicOn
+	c.mu.Unlock()
+
 	room := s.GetRoom(msg.Room)
 	room.AddClient(c)
 
 	log.Printf("%s joined room %s", c.ID, room.ID)
 
-	existing := room.ListClients(c.ID)
+	existing := room.ListClientsInfo(c.ID)
 
 	c.send(Message{
 		Type: "joined",
@@ -295,10 +347,41 @@ func (s *Server) handleJoin(c *Client, msg Message) {
 			Message{
 				Type: "user_joined",
 				From: c.ID,
+				Data: mustMarshal(c.peerInfo()),
 			},
 			c.ID,
 		)
 	}
+}
+
+func (s *Server) handleState(c *Client, msg Message) {
+	var info struct {
+		Name  string `json:"name"`
+		CamOn bool   `json:"camOn"`
+		MicOn bool   `json:"micOn"`
+	}
+	if len(msg.Data) > 0 {
+		_ = json.Unmarshal(msg.Data, &info)
+	}
+
+	c.mu.Lock()
+	c.Name = info.Name
+	c.CamOn = info.CamOn
+	c.MicOn = info.MicOn
+	c.mu.Unlock()
+
+	if c.Room == nil {
+		return
+	}
+
+	c.Room.Broadcast(
+		Message{
+			Type: "state",
+			From: c.ID,
+			Data: mustMarshal(c.peerInfo()),
+		},
+		c.ID,
+	)
 }
 
 func (s *Server) forward(c *Client, msg Message) {
@@ -401,29 +484,74 @@ func detectRelayIP() string {
 	return "127.0.0.1"
 }
 
+type Config struct {
+	HTTP struct {
+		Port string `yaml:"port"`
+	} `yaml:"http"`
+
+	TURN struct {
+		Enabled  bool   `yaml:"enabled"`
+		Port     string `yaml:"port"`
+		Realm    string `yaml:"realm"`
+		Username string `yaml:"username"`
+		Password string `yaml:"password"`
+		RelayIP  string `yaml:"relay_ip"`
+	} `yaml:"turn"`
+}
+
+func defaultConfig() Config {
+	var c Config
+	c.HTTP.Port = ":8080"
+	c.TURN.Enabled = true
+	c.TURN.Port = ":3478"
+	c.TURN.Realm = "sozvon"
+	c.TURN.Username = "sozvon"
+	c.TURN.Password = "sozvon123"
+	c.TURN.RelayIP = ""
+	return c
+}
+
+func loadConfig(path string) (Config, error) {
+	c := defaultConfig()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return c, err
+	}
+
+	if err := yaml.Unmarshal(data, &c); err != nil {
+		return c, err
+	}
+
+	return c, nil
+}
+
 func main() {
-	httpAddr := flag.String("http", ":8080", "адрес HTTP/сигналинг сервера")
-	turnAddr := flag.String("turn", ":3478", "адрес TURN сервера (udp)")
-	turnRealm := flag.String("realm", "sozvon", "TURN realm")
-	turnUser := flag.String("turn-user", "sozvon", "TURN username")
-	turnPass := flag.String("turn-pass", "sozvon123", "TURN password")
-	relayIP := flag.String("relay-ip", "", "внешний IP для TURN relay (по умолчанию: авто)")
-	enableTURN := flag.Bool("enable-turn", true, "запустить встроенный TURN сервер")
+	configPath := flag.String("config", "config.yaml", "путь к файлу конфигурации")
 	flag.Parse()
 
+	cfg, err := loadConfig(*configPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Fatalf("failed to load config %s: %v", *configPath, err)
+		}
+		log.Printf("config %s not found, using defaults", *configPath)
+		cfg = defaultConfig()
+	}
+
 	var turnServer *turn.Server
-	if *enableTURN {
-		rip := *relayIP
+	if cfg.TURN.Enabled {
+		rip := cfg.TURN.RelayIP
 		if rip == "" {
 			rip = detectRelayIP()
 		}
-		ts, err := startTURNServer(*turnAddr, rip, *turnRealm, *turnUser, *turnPass)
+		ts, err := startTURNServer(cfg.TURN.Port, rip, cfg.TURN.Realm, cfg.TURN.Username, cfg.TURN.Password)
 		if err != nil {
 			log.Fatalf("failed to start TURN server: %v", err)
 		}
 		turnServer = ts
 		defer turnServer.Close()
-		log.Printf("TURN server started on %s (relay %s, user=%s)", *turnAddr, rip, *turnUser)
+		log.Printf("TURN server started on %s (relay %s, user=%s)", cfg.TURN.Port, rip, cfg.TURN.Username)
 	}
 	_ = turnServer
 
@@ -438,15 +566,15 @@ func main() {
 			host = h
 		}
 		json.NewEncoder(w).Encode(map[string]any{
-			"urls":       []string{"turn:" + host + *turnAddr},
-			"username":   *turnUser,
-			"credential": *turnPass,
+			"urls":       []string{"turn:" + host + cfg.TURN.Port},
+			"username":   cfg.TURN.Username,
+			"credential": cfg.TURN.Password,
 		})
 	})
 
-	log.Printf("server started on %s", *httpAddr)
+	log.Printf("server started on %s", cfg.HTTP.Port)
 
-	if err := http.ListenAndServe(*httpAddr, nil); err != nil {
+	if err := http.ListenAndServe(cfg.HTTP.Port, nil); err != nil {
 		log.Fatal(err)
 	}
 }

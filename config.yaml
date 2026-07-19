@@ -1,0 +1,10 @@
+http:
+  port: ":8080"
+
+turn:
+  enabled: true
+  port: ":3478"
+  realm: "sozvon"
+  username: "sozvon"
+  password: "sozvon123"
+  relay_ip: ""

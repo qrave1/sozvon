@@ -5,13 +5,27 @@ function callApp() {
     { urls: "stun:stun.l.google.com:19302" },
   ];
 
+  const COLORS = [
+    "#e74c3c", "#3498db", "#2ecc71", "#9b59b6", "#f1c40f",
+    "#1abc9c", "#e67e22", "#34495e", "#fd79a8", "#00cec9",
+  ];
+
+  function colorFor(id) {
+    let h = 0;
+    for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+    return COLORS[h % COLORS.length];
+  }
+
   return {
-    room: "test",
+    name: "",
+    room: "",
     status: "не подключено",
     connected: false,
-    micOn: true,
-    camOn: true,
+    micOn: false,
+    camOn: false,
     localStream: null,
+    myColor: "#3498db",
+    initial: "Я",
     peers: [],
 
     ws: null,
@@ -48,9 +62,17 @@ function callApp() {
       });
     },
 
-    addPeer(id) {
+    addPeer(id, info) {
       if (!this.peers.find((p) => p.id === id)) {
-        this.peers.push({ id, mode: "" });
+        this.peers.push({
+          id,
+          name: info?.name || "",
+          camOn: info?.camOn ?? true,
+          micOn: info?.micOn ?? true,
+          color: colorFor(id),
+          initial: (info?.name || id).slice(0, 1).toUpperCase(),
+          mode: "",
+        });
       }
     },
 
@@ -66,6 +88,13 @@ function callApp() {
     setPeerMode(id, mode) {
       const p = this.peers.find((x) => x.id === id);
       if (p) p.mode = mode;
+    },
+
+    updatePeer(id, patch) {
+      const p = this.peers.find((x) => x.id === id);
+      if (!p) return;
+      Object.assign(p, patch);
+      if (patch.name) p.initial = patch.name.slice(0, 1).toUpperCase();
     },
 
     createPeer(peerId, initiator) {
@@ -116,7 +145,23 @@ function callApp() {
     },
 
     async startMedia() {
-      this.localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      const wantVideo = this.camOn;
+      const wantAudio = this.micOn;
+      this.localStream = await navigator.mediaDevices.getUserMedia({
+        video: wantVideo,
+        audio: wantAudio,
+      });
+
+      if (!wantVideo) {
+        this.localStream.getVideoTracks().forEach((t) => (t.enabled = false));
+      }
+      if (!wantAudio) {
+        this.localStream.getAudioTracks().forEach((t) => (t.enabled = false));
+      }
+
+      this.myColor = colorFor(this.myId || this.name || "me");
+      this.initial = (this.name || "Я").slice(0, 1).toUpperCase();
+
       this.$nextTick(() => {
         const v = document.getElementById("vid-local");
         if (v) v.srcObject = this.localStream;
@@ -131,7 +176,10 @@ function callApp() {
 
     async join() {
       const room = (this.room || "").trim();
-      if (!room) return;
+      if (!room) {
+        this.status = "введите ID комнаты";
+        return;
+      }
 
       this.status = "запрос камеры/микрофона...";
       try {
@@ -150,7 +198,11 @@ function callApp() {
       this.ws.onopen = () => {
         this.connected = true;
         this.status = "в созвоне: " + room;
-        this.send({ type: "join", room });
+        this.send({
+          type: "join",
+          room,
+          data: { name: this.name, camOn: this.camOn, micOn: this.micOn },
+        });
       };
 
       this.ws.onclose = () => {
@@ -164,22 +216,36 @@ function callApp() {
       };
     },
 
+    parseInfo(raw) {
+      if (!raw) return {};
+      if (typeof raw === "string") {
+        try {
+          return JSON.parse(raw);
+        } catch {
+          return {};
+        }
+      }
+      return raw;
+    },
+
     async handleMessage(msg) {
       switch (msg.type) {
         case "joined": {
           this.myId = msg.data.id;
           const peersList = msg.data.peers || [];
-          for (const peerId of peersList) {
-            if (peerId === this.myId) continue;
-            this.addPeer(peerId);
-            this.createPeer(peerId, true);
+          for (const p of peersList) {
+            const info = this.parseInfo(p);
+            if (p.id === this.myId) continue;
+            this.addPeer(p.id, info);
+            this.createPeer(p.id, true);
           }
           break;
         }
 
         case "user_joined": {
           const peerId = msg.from;
-          this.addPeer(peerId);
+          const info = this.parseInfo(msg.data);
+          this.addPeer(peerId, info);
           this.createPeer(peerId, false);
           break;
         }
@@ -189,11 +255,19 @@ function callApp() {
           break;
         }
 
+        case "state": {
+          const peerId = msg.from;
+          const info = this.parseInfo(msg.data);
+          this.updatePeer(peerId, info);
+          break;
+        }
+
         case "offer": {
           const peerId = msg.from;
           let pc = this.pcs.get(peerId);
           if (!pc) {
-            this.addPeer(peerId);
+            const info = this.parseInfo(msg.data);
+            this.addPeer(peerId, info);
             pc = this.createPeer(peerId, false);
           }
           await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
@@ -242,12 +316,20 @@ function callApp() {
       this.status = "не подключено";
     },
 
+    broadcastState() {
+      this.send({
+        type: "state",
+        data: { name: this.name, camOn: this.camOn, micOn: this.micOn },
+      });
+    },
+
     toggleMic() {
       if (!this.localStream) return;
       const track = this.localStream.getAudioTracks()[0];
       if (!track) return;
       track.enabled = !track.enabled;
       this.micOn = track.enabled;
+      this.broadcastState();
     },
 
     toggleCam() {
@@ -256,6 +338,7 @@ function callApp() {
       if (!track) return;
       track.enabled = !track.enabled;
       this.camOn = track.enabled;
+      this.broadcastState();
     },
   };
 }
