@@ -145,26 +145,25 @@ function callApp() {
     },
 
     async startMedia() {
-      const wantVideo = this.camOn;
-      const wantAudio = this.micOn;
-      this.localStream = await navigator.mediaDevices.getUserMedia({
-        video: wantVideo,
-        audio: wantAudio,
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("getUserMedia недоступен: нужен https:// или http://localhost");
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
       });
+      this.localStream = stream;
 
-      if (!wantVideo) {
-        this.localStream.getVideoTracks().forEach((t) => (t.enabled = false));
-      }
-      if (!wantAudio) {
-        this.localStream.getAudioTracks().forEach((t) => (t.enabled = false));
-      }
+      stream.getVideoTracks().forEach((t) => (t.enabled = this.camOn));
+      stream.getAudioTracks().forEach((t) => (t.enabled = this.micOn));
 
-      this.myColor = colorFor(this.myId || this.name || "me");
+      this.myColor = colorFor(this.name || "me");
       this.initial = (this.name || "Я").slice(0, 1).toUpperCase();
 
       this.$nextTick(() => {
         const v = document.getElementById("vid-local");
-        if (v) v.srcObject = this.localStream;
+        if (v) v.srcObject = stream;
       });
     },
 
@@ -182,10 +181,16 @@ function callApp() {
       }
 
       this.status = "запрос камеры/микрофона...";
+      this.myColor = colorFor(this.name || "me");
+      this.initial = (this.name || "Я").slice(0, 1).toUpperCase();
       try {
         await this.startMedia();
       } catch (err) {
-        this.status = "нет доступа к камере/микрофону";
+        let msg = "ошибка медиа: " + (err && err.name ? err.name : err);
+        if (err && err.name === "NotAllowedError") msg = "доступ к камере/микрофону запрещён";
+        if (err && err.name === "NotFoundError") msg = "камера/микрофон не найдены";
+        if (err && (err.message || "").includes("getUserMedia недоступен")) msg = err.message;
+        this.status = msg;
         console.error(err);
         return;
       }
@@ -323,7 +328,19 @@ function callApp() {
       });
     },
 
-    toggleMic() {
+    async negotiateAll() {
+      for (const [peerId, pc] of this.pcs) {
+        try {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          this.send({ type: "offer", to: peerId, data: offer });
+        } catch (err) {
+          console.error("renegotiate failed", err);
+        }
+      }
+    },
+
+    async toggleMic() {
       if (!this.localStream) return;
       const track = this.localStream.getAudioTracks()[0];
       if (!track) return;
@@ -332,12 +349,13 @@ function callApp() {
       this.broadcastState();
     },
 
-    toggleCam() {
+    async toggleCam() {
       if (!this.localStream) return;
       const track = this.localStream.getVideoTracks()[0];
       if (!track) return;
       track.enabled = !track.enabled;
       this.camOn = track.enabled;
+      if (this.pcs.size > 0) await this.negotiateAll();
       this.broadcastState();
     },
   };

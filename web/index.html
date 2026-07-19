@@ -93,13 +93,13 @@
     <input x-model="room" placeholder="ID комнаты" :disabled="connected" />
     <button x-show="!connected" @click="join()">Войти</button>
     <button class="danger" x-show="connected" @click="leave()">Выйти</button>
-    <button :class="micOn ? '' : 'off'" x-text="micOn ? 'Микрофон: вкл' : 'Микрофон: выкл'" @click="toggleMic()" :disabled="!localStream"></button>
-    <button :class="camOn ? '' : 'off'" x-text="camOn ? 'Камера: вкл' : 'Камера: выкл'" @click="toggleCam()" :disabled="!localStream"></button>
+    <button :class="micOn ? '' : 'off'" x-text="micOn ? 'Микрофон: вкл' : 'Микрофон: выкл'" @click="toggleMic()"></button>
+    <button :class="camOn ? '' : 'off'" x-text="camOn ? 'Камера: вкл' : 'Камера: выкл'" @click="toggleCam()"></button>
     <span id="status" x-text="status"></span>
   </header>
 
   <div id="videos">
-      <div class="tile" x-show="localStream">
+      <div class="tile" x-show="connected">
       <video id="vid-local" autoplay playsinline muted x-show="camOn"></video>
       <div class="avatar" x-show="!camOn" :style="'background:' + myColor" x-text="initial"></div>
       <div class="label">

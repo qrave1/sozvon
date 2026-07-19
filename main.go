@@ -557,7 +557,7 @@ func main() {
 
 	server := NewServer()
 
-	http.Handle("/", http.FileServer(http.Dir("./static")))
+	http.Handle("/", http.FileServer(http.Dir("./web")))
 	http.HandleFunc("/ws", server.handleWS)
 	http.HandleFunc("/turn-config", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
