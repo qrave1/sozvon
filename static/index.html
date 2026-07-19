@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sozvon — групповые созвоны</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0f1115;
+      color: #e6e6e6;
+    }
+    header {
+      padding: 12px 16px;
+      background: #1a1d24;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    header input {
+      padding: 8px 10px;
+      border-radius: 6px;
+      border: 1px solid #333;
+      background: #11131a;
+      color: #fff;
+    }
+    button {
+      padding: 8px 14px;
+      border-radius: 6px;
+      border: none;
+      background: #2f6feb;
+      color: #fff;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    button:disabled { opacity: .5; cursor: default; }
+    button.danger { background: #c0392b; }
+    #status { margin-left: auto; font-size: 13px; opacity: .8; }
+    #videos {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 10px;
+      padding: 16px;
+    }
+    .tile {
+      position: relative;
+      background: #000;
+      border-radius: 10px;
+      overflow: hidden;
+      aspect-ratio: 4 / 3;
+    }
+    .tile video { width: 100%; height: 100%; object-fit: cover; }
+    .tile .label {
+      position: absolute;
+      bottom: 6px; left: 8px;
+      font-size: 12px;
+      background: rgba(0,0,0,.5);
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+    .controls { padding: 0 16px 16px; display: flex; gap: 8px; }
+  </style>
+</head>
+<body>
+  <header>
+    <input id="room" placeholder="ID комнаты" value="test" />
+    <button id="join">Войти</button>
+    <button id="leave" class="danger" disabled>Выйти</button>
+    <span id="status">не подключено</span>
+  </header>
+
+  <div class="controls">
+    <button id="mic">Микрофон: вкл</button>
+    <button id="cam">Камера: вкл</button>
+  </div>
+
+  <div id="videos"></div>
+
+  <script src="/client.js"></script>
+</body>
+</html>
