@@ -38,6 +38,7 @@
     }
     button:disabled { opacity: .5; cursor: default; }
     button.danger { background: #c0392b; }
+    button.off { background: #555; }
     #status { margin-left: auto; font-size: 13px; opacity: .8; }
     #videos {
       display: grid;
@@ -52,7 +53,7 @@
       overflow: hidden;
       aspect-ratio: 4 / 3;
     }
-    .tile video { width: 100%; height: 100%; object-fit: cover; }
+    .tile video { width: 100%; height: 100%; object-fit: cover; background: #000; }
     .tile .label {
       position: absolute;
       bottom: 6px; left: 8px;
@@ -61,24 +62,43 @@
       padding: 2px 8px;
       border-radius: 4px;
     }
-    .controls { padding: 0 16px 16px; display: flex; gap: 8px; }
+    .tile .badge {
+      position: absolute;
+      top: 6px; right: 8px;
+      font-size: 11px;
+      background: rgba(0,0,0,.5);
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+    .controls { padding: 0 16px 16px; display: flex; gap: 8px; flex-wrap: wrap; }
   </style>
 </head>
-<body>
+<body x-data="callApp()" x-init="init()">
   <header>
-    <input id="room" placeholder="ID комнаты" value="test" />
-    <button id="join">Войти</button>
-    <button id="leave" class="danger" disabled>Выйти</button>
-    <span id="status">не подключено</span>
+    <input x-model="room" placeholder="ID комнаты" :disabled="connected" />
+    <button x-show="!connected" @click="join()">Войти</button>
+    <button class="danger" x-show="connected" @click="leave()">Выйти</button>
+    <button :class="micOn ? '' : 'off'" x-text="micOn ? 'Микрофон: вкл' : 'Микрофон: выкл'" @click="toggleMic()"></button>
+    <button :class="camOn ? '' : 'off'" x-text="camOn ? 'Камера: вкл' : 'Камера: выкл'" @click="toggleCam()"></button>
+    <span id="status" x-text="status"></span>
   </header>
 
-  <div class="controls">
-    <button id="mic">Микрофон: вкл</button>
-    <button id="cam">Камера: вкл</button>
+  <div id="videos">
+    <div class="tile" x-show="localStream">
+      <video id="vid-local" autoplay playsinline muted></video>
+      <div class="label">я</div>
+    </div>
+
+    <template x-for="p in peers" :key="p.id">
+      <div class="tile">
+        <video :id="'vid-' + p.id" autoplay playsinline></video>
+        <div class="label" x-text="p.id.slice(0, 8)"></div>
+        <div class="badge" x-show="p.mode" x-text="p.mode"></div>
+      </div>
+    </template>
   </div>
 
-  <div id="videos"></div>
-
+  <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
   <script src="/client.js"></script>
 </body>
 </html>
