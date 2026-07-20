@@ -1,12 +1,12 @@
-module sozvon
+module github.com/qrave1/sozvon
 
 go 1.26
 
 require (
+	github.com/caarlos0/env/v11 v11.4.1
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/pion/turn/v3 v3.0.3
-	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

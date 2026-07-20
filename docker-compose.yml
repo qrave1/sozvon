@@ -1,0 +1,33 @@
+services:
+    sozvon:
+        image: ghcr.io/qrave1/sozvon:latest
+        container_name: sozvon
+        restart: always
+        env_file:
+            - .env
+        networks:
+            - traefik
+        ports:
+            - "3478:3478/udp"
+        labels:
+            - "traefik.enable=true"
+            - "traefik.http.routers.app.rule=Host(`xxsm.ru`)"
+            - "traefik.http.routers.app.entrypoints=websecure"
+            - "traefik.http.routers.app.tls.certresolver=myresolver"
+            - "traefik.http.services.app.loadbalancer.server.port=8000"
+            # Watchtower будет обновлять этот контейнер
+            - "com.centurylinklabs.watchtower.enable=true"
+
+    watchtower:
+        image: containrrr/watchtower
+        container_name: watchtower
+        restart: always
+        volumes:
+            - /var/run/docker.sock:/var/run/docker.sock
+        command: --label-enable --cleanup --interval 300
+        networks:
+            - traefik
+
+networks:
+    traefik:
+        external: true

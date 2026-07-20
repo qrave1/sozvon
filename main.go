@@ -2,18 +2,16 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"sync"
 	"time"
 
+	"github.com/caarlos0/env/v11"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/pion/turn/v3"
-	"gopkg.in/yaml.v3"
 )
 
 type Message struct {
@@ -485,75 +483,36 @@ func detectRelayIP() string {
 }
 
 type Config struct {
-	HTTP struct {
-		Port string `yaml:"port"`
-	} `yaml:"http"`
+	HTTPPort string `env:"HTTP_PORT" envDefault:":8000"`
 
-	TURN struct {
-		Enabled  bool   `yaml:"enabled"`
-		Port     string `yaml:"port"`
-		Realm    string `yaml:"realm"`
-		Username string `yaml:"username"`
-		Password string `yaml:"password"`
-		RelayIP  string `yaml:"relay_ip"`
-	} `yaml:"turn"`
-}
-
-func defaultConfig() Config {
-	var c Config
-	c.HTTP.Port = ":8080"
-	c.TURN.Enabled = true
-	c.TURN.Port = ":3478"
-	c.TURN.Realm = "sozvon"
-	c.TURN.Username = "sozvon"
-	c.TURN.Password = "sozvon123"
-	c.TURN.RelayIP = ""
-	return c
-}
-
-func loadConfig(path string) (Config, error) {
-	c := defaultConfig()
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return c, err
-	}
-
-	if err := yaml.Unmarshal(data, &c); err != nil {
-		return c, err
-	}
-
-	return c, nil
+	TURNEnabled  bool   `env:"TURN_ENABLED" envDefault:"true"`
+	TURNPort     string `env:"TURN_PORT" envDefault:":3478"`
+	TURNRealm    string `env:"TURN_REALM" envDefault:"sozvon"`
+	TURNUsername string `env:"TURN_USERNAME" envDefault:"sozvon"`
+	TURNPassword string `env:"TURN_PASSWORD" envDefault:"sozvon123"`
+	TURNRelayIP  string `env:"TURN_RELAY_IP"`
 }
 
 func main() {
-	configPath := flag.String("config", "config.yaml", "путь к файлу конфигурации")
-	flag.Parse()
-
-	cfg, err := loadConfig(*configPath)
+	cfg, err := env.ParseAs[Config]()
 	if err != nil {
-		if !os.IsNotExist(err) {
-			log.Fatalf("failed to load config %s: %v", *configPath, err)
-		}
-		log.Printf("config %s not found, using defaults", *configPath)
-		cfg = defaultConfig()
+		log.Fatalf("failed to parse config: %v", err)
 	}
 
 	var turnServer *turn.Server
-	if cfg.TURN.Enabled {
-		rip := cfg.TURN.RelayIP
+	if cfg.TURNEnabled {
+		rip := cfg.TURNRelayIP
 		if rip == "" {
 			rip = detectRelayIP()
 		}
-		ts, err := startTURNServer(cfg.TURN.Port, rip, cfg.TURN.Realm, cfg.TURN.Username, cfg.TURN.Password)
+		ts, err := startTURNServer(cfg.TURNPort, rip, cfg.TURNRealm, cfg.TURNUsername, cfg.TURNPassword)
 		if err != nil {
 			log.Fatalf("failed to start TURN server: %v", err)
 		}
 		turnServer = ts
 		defer turnServer.Close()
-		log.Printf("TURN server started on %s (relay %s, user=%s)", cfg.TURN.Port, rip, cfg.TURN.Username)
+		log.Printf("TURN server started on %s (relay %s, user=%s)", cfg.TURNPort, rip, cfg.TURNUsername)
 	}
-	_ = turnServer
 
 	server := NewServer()
 
@@ -566,15 +525,15 @@ func main() {
 			host = h
 		}
 		json.NewEncoder(w).Encode(map[string]any{
-			"urls":       []string{"turn:" + host + cfg.TURN.Port},
-			"username":   cfg.TURN.Username,
-			"credential": cfg.TURN.Password,
+			"urls":       []string{"turn:" + host + cfg.TURNPort},
+			"username":   cfg.TURNUsername,
+			"credential": cfg.TURNPassword,
 		})
 	})
 
-	log.Printf("server started on %s", cfg.HTTP.Port)
+	log.Printf("server started on %s", cfg.HTTPPort)
 
-	if err := http.ListenAndServe(cfg.HTTP.Port, nil); err != nil {
+	if err := http.ListenAndServe(cfg.HTTPPort, nil); err != nil {
 		log.Fatal(err)
 	}
 }
