@@ -545,12 +545,8 @@ func main() {
 	http.HandleFunc("/ws", server.handleWS)
 	http.HandleFunc("/turn-config", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		host := r.Host
-		if h, _, err := net.SplitHostPort(r.Host); err == nil {
-			host = h
-		}
 		json.NewEncoder(w).Encode(map[string]any{
-			"urls":       []string{"turn:" + host + cfg.TURNPort},
+			"urls":       []string{"turn:" + cfg.TURNRelayIP + cfg.TURNPort},
 			"username":   cfg.TURNUsername,
 			"credential": cfg.TURNPassword,
 		})
