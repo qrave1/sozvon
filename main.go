@@ -2,15 +2,19 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/pion/logging"
 	"github.com/pion/turn/v3"
 )
 
@@ -431,6 +435,37 @@ func mustMarshal(v any) json.RawMessage {
 	return b
 }
 
+// --- slog-адаптер для pion/logging ---
+
+type slogLogger struct {
+	l *slog.Logger
+}
+
+func (s slogLogger) Trace(msg string) { s.l.Debug(msg) }
+func (s slogLogger) Tracef(format string, args ...interface{}) {
+	s.l.Debug(fmt.Sprintf(format, args...))
+}
+func (s slogLogger) Debug(msg string) { s.l.Debug(msg) }
+func (s slogLogger) Debugf(format string, args ...interface{}) {
+	s.l.Debug(fmt.Sprintf(format, args...))
+}
+func (s slogLogger) Info(msg string)                          { s.l.Info(msg) }
+func (s slogLogger) Infof(format string, args ...interface{}) { s.l.Info(fmt.Sprintf(format, args...)) }
+func (s slogLogger) Warn(msg string)                          { s.l.Warn(msg) }
+func (s slogLogger) Warnf(format string, args ...interface{}) { s.l.Warn(fmt.Sprintf(format, args...)) }
+func (s slogLogger) Error(msg string)                         { s.l.Error(msg) }
+func (s slogLogger) Errorf(format string, args ...interface{}) {
+	s.l.Error(fmt.Sprintf(format, args...))
+}
+
+type slogLoggerFactory struct {
+	l *slog.Logger
+}
+
+func (f slogLoggerFactory) NewLogger(scope string) logging.LeveledLogger {
+	return slogLogger{l: f.l.With("component", scope)}
+}
+
 func startTURNServer(listen, relayIP, realm, username, password string) (*turn.Server, error) {
 	udpAddr, err := net.ResolveUDPAddr("udp", listen)
 	if err != nil {
@@ -443,7 +478,8 @@ func startTURNServer(listen, relayIP, realm, username, password string) (*turn.S
 	}
 
 	server, err := turn.NewServer(turn.ServerConfig{
-		Realm: realm,
+		Realm:         realm,
+		LoggerFactory: slogLoggerFactory{l: slog.Default()},
 		PacketConnConfigs: []turn.PacketConnConfig{
 			{
 				PacketConn: udpListener,
@@ -467,21 +503,6 @@ func startTURNServer(listen, relayIP, realm, username, password string) (*turn.S
 	return server, nil
 }
 
-func detectRelayIP() string {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return "127.0.0.1"
-	}
-	for _, a := range addrs {
-		ipNet, ok := a.(*net.IPNet)
-		if !ok || ipNet.IP.IsLoopback() || ipNet.IP.To4() == nil {
-			continue
-		}
-		return ipNet.IP.String()
-	}
-	return "127.0.0.1"
-}
-
 type Config struct {
 	HTTPPort string `env:"HTTP_PORT" envDefault:":8000"`
 
@@ -494,6 +515,8 @@ type Config struct {
 }
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
 	cfg, err := env.ParseAs[Config]()
 	if err != nil {
 		log.Fatalf("failed to parse config: %v", err)
@@ -501,17 +524,18 @@ func main() {
 
 	var turnServer *turn.Server
 	if cfg.TURNEnabled {
-		rip := cfg.TURNRelayIP
-		if rip == "" {
-			rip = detectRelayIP()
+		if cfg.TURNRelayIP == "" {
+			slog.Error("TURN relay IP is empty")
+			os.Exit(-1)
 		}
-		ts, err := startTURNServer(cfg.TURNPort, rip, cfg.TURNRealm, cfg.TURNUsername, cfg.TURNPassword)
+
+		ts, err := startTURNServer(cfg.TURNPort, cfg.TURNRelayIP, cfg.TURNRealm, cfg.TURNUsername, cfg.TURNPassword)
 		if err != nil {
 			log.Fatalf("failed to start TURN server: %v", err)
 		}
 		turnServer = ts
 		defer turnServer.Close()
-		log.Printf("TURN server started on %s (relay %s, user=%s)", cfg.TURNPort, rip, cfg.TURNUsername)
+		log.Printf("TURN server started on %s (relay %s, user=%s)", cfg.TURNPort, cfg.TURNRelayIP, cfg.TURNUsername)
 	}
 
 	server := NewServer()
