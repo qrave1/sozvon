@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -53,7 +52,7 @@ func (c *Client) send(msg Message) bool {
 	case c.Send <- msg:
 		return true
 	default:
-		log.Printf("client %s send buffer full", c.ID)
+		slog.Warn("client send buffer full", "client", c.ID)
 		return false
 	}
 }
@@ -206,7 +205,7 @@ const (
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println(err)
+		slog.Error("websocket upgrade failed", "error", err)
 		return
 	}
 
@@ -218,7 +217,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		Send: make(chan Message, 256),
 	}
 
-	log.Printf("client connected: %s", client.ID)
+	slog.Info("client connected", "client", client.ID)
 
 	go client.writeLoop()
 	go s.readLoop(client)
@@ -264,7 +263,7 @@ func (s *Server) readLoop(c *Client) {
 
 		if err := c.Conn.ReadJSON(&msg); err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
-				log.Printf("read error (%s): %v", c.ID, err)
+				slog.Error("read error", "client", c.ID, "error", err)
 			}
 			return
 		}
@@ -286,7 +285,7 @@ func (s *Server) readLoop(c *Client) {
 			s.forward(c, msg)
 
 		default:
-			log.Printf("unknown message type: %s", msg.Type)
+			slog.Warn("unknown message type", "type", msg.Type)
 		}
 	}
 }
@@ -331,7 +330,7 @@ func (s *Server) handleJoin(c *Client, msg Message) {
 	room := s.GetRoom(msg.Room)
 	room.AddClient(c)
 
-	log.Printf("%s joined room %s", c.ID, room.ID)
+	slog.Info("client joined room", "client", c.ID, "room", room.ID)
 
 	existing := room.ListClientsInfo(c.ID)
 
@@ -417,13 +416,13 @@ func (s *Server) disconnect(c *Client) {
 
 		if room.IsEmpty() {
 			s.RemoveRoom(room.ID)
-			log.Printf("room %s removed", room.ID)
+			slog.Info("room removed", "room", room.ID)
 		}
 	}
 
 	c.close()
 
-	log.Printf("client disconnected: %s", c.ID)
+	slog.Info("client disconnected", "client", c.ID)
 }
 
 func mustMarshal(v any) json.RawMessage {
@@ -519,7 +518,8 @@ func main() {
 
 	cfg, err := env.ParseAs[Config]()
 	if err != nil {
-		log.Fatalf("failed to parse config: %v", err)
+		slog.Error("failed to parse config", "error", err)
+		os.Exit(1)
 	}
 
 	var turnServer *turn.Server
@@ -531,11 +531,12 @@ func main() {
 
 		ts, err := startTURNServer(cfg.TURNPort, cfg.TURNRelayIP, cfg.TURNRealm, cfg.TURNUsername, cfg.TURNPassword)
 		if err != nil {
-			log.Fatalf("failed to start TURN server: %v", err)
+			slog.Error("failed to start TURN server", "error", err)
+			os.Exit(1)
 		}
 		turnServer = ts
 		defer turnServer.Close()
-		log.Printf("TURN server started on %s (relay %s, user=%s)", cfg.TURNPort, cfg.TURNRelayIP, cfg.TURNUsername)
+		slog.Info("TURN server started", "port", cfg.TURNPort, "relay", cfg.TURNRelayIP, "user", cfg.TURNUsername)
 	}
 
 	server := NewServer()
@@ -555,9 +556,10 @@ func main() {
 		})
 	})
 
-	log.Printf("server started on %s", cfg.HTTPPort)
+	slog.Info("server started", "port", cfg.HTTPPort)
 
 	if err := http.ListenAndServe(cfg.HTTPPort, nil); err != nil {
-		log.Fatal(err)
+		slog.Error("server failed", "error", err)
+		os.Exit(1)
 	}
 }
