@@ -33,8 +33,30 @@ function callApp() {
     iceServers: ICE_SERVERS,
     pcs: new Map(),
 
+    audioInputId: "",
+    audioOutputId: "",
+    videoId: "",
+    devices: { audioinput: [], audiooutput: [], videoinput: [] },
+
     async init() {
       window.addEventListener("beforeunload", () => this.leave());
+      await this.enumerateDevices();
+      navigator.mediaDevices?.addEventListener("devicechange", () => {
+        this.enumerateDevices();
+      });
+    },
+
+    async enumerateDevices() {
+      if (!navigator.mediaDevices?.enumerateDevices) return;
+      const all = await navigator.mediaDevices.enumerateDevices();
+      const grouped = { audioinput: [], audiooutput: [], videoinput: [] };
+      for (const d of all) {
+        if (d.kind in grouped) grouped[d.kind].push(d);
+      }
+      this.devices = grouped;
+      if (!this.audioInputId && grouped.audioinput.length) this.audioInputId = grouped.audioinput[0].deviceId;
+      if (!this.audioOutputId && grouped.audiooutput.length) this.audioOutputId = grouped.audiooutput[0].deviceId;
+      if (!this.videoId && grouped.videoinput.length) this.videoId = grouped.videoinput[0].deviceId;
     },
 
     async loadIceServers() {
@@ -153,10 +175,9 @@ function callApp() {
         throw new Error("getUserMedia недоступен");
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true,
-      });
+      const audio = this.audioInputId ? { deviceId: { exact: this.audioInputId } } : true;
+      const video = this.videoId ? { deviceId: { exact: this.videoId } } : true;
+      const stream = await navigator.mediaDevices.getUserMedia({ audio, video });
       this.localStream = stream;
 
       stream.getVideoTracks().forEach((t) => (t.enabled = this.camOn));
@@ -168,7 +189,56 @@ function callApp() {
       this.$nextTick(() => {
         const v = document.getElementById("vid-local");
         if (v) v.srcObject = stream;
+        this.applyAudioOutput();
       });
+    },
+
+    applyAudioOutput() {
+      if (!this.audioOutputId || typeof HTMLVideoElement.prototype.setSinkId !== "function") return;
+      document.querySelectorAll("#videos video").forEach((v) => {
+        v.setSinkId(this.audioOutputId).catch(() => {});
+      });
+    },
+
+    async changeDevice(kind) {
+      if (kind === "audiooutput") {
+        this.applyAudioOutput();
+        return;
+      }
+
+      if (!this.connected) return;
+
+      if (this.localStream) {
+        this.localStream.getTracks().forEach((t) => t.stop());
+      }
+
+      const audio = this.audioInputId ? { deviceId: { exact: this.audioInputId } } : true;
+      const video = this.videoId ? { deviceId: { exact: this.videoId } } : true;
+      const stream = await navigator.mediaDevices.getUserMedia({ audio, video });
+
+      for (const pc of this.pcs.values()) {
+        const senders = pc.getSenders();
+        for (const newTrack of stream.getTracks()) {
+          const sender = senders.find((s) => s.track?.kind === newTrack.kind);
+          if (sender) {
+            await sender.replaceTrack(newTrack);
+          } else {
+            pc.addTrack(newTrack, stream);
+          }
+        }
+      }
+
+      stream.getVideoTracks().forEach((t) => (t.enabled = this.camOn));
+      stream.getAudioTracks().forEach((t) => (t.enabled = this.micOn));
+
+      this.localStream = stream;
+
+      this.$nextTick(() => {
+        const v = document.getElementById("vid-local");
+        if (v) v.srcObject = stream;
+      });
+
+      if (this.pcs.size > 0) await this.negotiateAll();
     },
 
     send(obj) {

@@ -85,6 +85,30 @@
       color: #fff;
     }
     .controls { padding: 0 16px 16px; display: flex; gap: 8px; flex-wrap: wrap; }
+    .device-bar {
+      padding: 0 16px 12px;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .device-bar label {
+      font-size: 12px;
+      opacity: .7;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .device-bar select {
+      padding: 5px 8px;
+      border-radius: 6px;
+      border: 1px solid #333;
+      background: #11131a;
+      color: #fff;
+      font-size: 12px;
+      max-width: 180px;
+    }
+    .device-bar select:disabled { opacity: .4; cursor: default; }
   </style>
 </head>
 <body x-data="callApp()" x-init="init()">
@@ -97,6 +121,30 @@
     <button :class="camOn ? '' : 'off'" x-text="camOn ? 'Камера: вкл' : 'Камера: выкл'" @click="toggleCam()"></button>
     <span id="status" x-text="status"></span>
   </header>
+
+  <div class="device-bar">
+    <label>🎤
+      <select x-model="audioInputId" @change="changeDevice('audioinput')" :disabled="connected">
+        <template x-for="d in devices.audioinput" :key="d.deviceId">
+          <option :value="d.deviceId" x-text="d.label || d.deviceId.slice(0,12) + '…'"></option>
+        </template>
+      </select>
+    </label>
+    <label>🔊
+      <select x-model="audioOutputId" @change="changeDevice('audiooutput')" :disabled="connected">
+        <template x-for="d in devices.audiooutput" :key="d.deviceId">
+          <option :value="d.deviceId" x-text="d.label || d.deviceId.slice(0,12) + '…'"></option>
+        </template>
+      </select>
+    </label>
+    <label>📷
+      <select x-model="videoId" @change="changeDevice('videoinput')" :disabled="connected">
+        <template x-for="d in devices.videoinput" :key="d.deviceId">
+          <option :value="d.deviceId" x-text="d.label || d.deviceId.slice(0,12) + '…'"></option>
+        </template>
+      </select>
+    </label>
+  </div>
 
   <div id="videos">
       <div class="tile" x-show="connected">
