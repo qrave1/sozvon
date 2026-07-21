@@ -118,12 +118,16 @@ function callApp() {
       };
 
       pc.oniceconnectionstatechange = () => {
-        if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
+        const state = pc.iceConnectionState;
+        if (state === "connected" || state === "completed") {
           let mode = "direct";
           const sel = pc.getReceivers()[0]?.transport?.getSelectedCandidatePair?.();
           const local = sel?.local ?? pc.sctp?.transport?.getSelectedCandidatePair?.()?.local;
           if (local && local.candidateType === "relay") mode = "relay";
           this.setPeerMode(peerId, mode);
+        } else if (state === "disconnected" || state === "failed") {
+          this.setPeerMode(peerId, "reconnecting...");
+          try { pc.restartIce(); } catch (e) { /* ignore */ }
         }
       };
 
@@ -210,15 +214,38 @@ function callApp() {
         });
       };
 
-      this.ws.onclose = () => {
-        this.status = "соединение закрыто";
-        this.connected = false;
-      };
+      this.ws.onclose = () => this.handleClose();
 
       this.ws.onmessage = async (ev) => {
         const msg = JSON.parse(ev.data);
         await this.handleMessage(msg);
       };
+    },
+
+    handleClose() {
+      this.connected = false;
+      if (this.room && this.myId) {
+        this.status = "соединение потеряно, переподключение...";
+        setTimeout(() => this.reconnect(), 2000);
+      } else {
+        this.status = "соединение закрыто";
+      }
+    },
+
+    async reconnect() {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      const ws = new WebSocket(`${proto}://${location.host}/ws`);
+      ws.onopen = () => {
+        this.connected = true;
+        this.status = "в созвоне: " + this.room;
+        this.send({ type: "join", room: this.room, data: { name: this.name, camOn: this.camOn, micOn: this.micOn } });
+      };
+      ws.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+        this.handleMessage(msg);
+      };
+      ws.onclose = () => this.handleClose();
+      this.ws = ws;
     },
 
     parseInfo(raw) {

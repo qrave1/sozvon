@@ -476,12 +476,26 @@ func startTURNServer(listen, relayIP, realm, username, password string) (*turn.S
 		return nil, err
 	}
 
+	tcpListener, err := net.Listen("tcp", listen)
+	if err != nil {
+		return nil, err
+	}
+
 	server, err := turn.NewServer(turn.ServerConfig{
 		Realm:         realm,
 		LoggerFactory: slogLoggerFactory{l: slog.Default()},
 		PacketConnConfigs: []turn.PacketConnConfig{
 			{
 				PacketConn: udpListener,
+				RelayAddressGenerator: &turn.RelayAddressGeneratorStatic{
+					RelayAddress: net.ParseIP(relayIP),
+					Address:      "0.0.0.0",
+				},
+			},
+		},
+		ListenerConfigs: []turn.ListenerConfig{
+			{
+				Listener: tcpListener,
 				RelayAddressGenerator: &turn.RelayAddressGeneratorStatic{
 					RelayAddress: net.ParseIP(relayIP),
 					Address:      "0.0.0.0",
@@ -505,11 +519,11 @@ func startTURNServer(listen, relayIP, realm, username, password string) (*turn.S
 type Config struct {
 	HTTPPort string `env:"HTTP_PORT" envDefault:":8000"`
 
-	TURNEnabled  bool   `env:"TURN_ENABLED" envDefault:"true"`
-	TURNPort     string `env:"TURN_PORT" envDefault:":3478"`
-	TURNRealm    string `env:"TURN_REALM" envDefault:"sozvon"`
-	TURNUsername string `env:"TURN_USERNAME" envDefault:"sozvon"`
-	TURNPassword string `env:"TURN_PASSWORD" envDefault:"sozvon123"`
+	TURNEnabled   bool   `env:"TURN_ENABLED" envDefault:"true"`
+	TURNPort      string `env:"TURN_PORT" envDefault:":3478"`
+	TURNRealm     string `env:"TURN_REALM" envDefault:"sozvon"`
+	TURNUsername  string `env:"TURN_USERNAME" envDefault:"sozvon"`
+	TURNPassword  string `env:"TURN_PASSWORD" envDefault:"sozvon123"`
 	TURNRelayIP  string `env:"TURN_RELAY_IP"`
 }
 
@@ -535,9 +549,9 @@ func main() {
 			os.Exit(1)
 		}
 		turnServer = ts
-		defer turnServer.Close()
 		slog.Info("TURN server started", "port", cfg.TURNPort, "relay", cfg.TURNRelayIP, "user", cfg.TURNUsername)
 	}
+	defer turnServer.Close()
 
 	server := NewServer()
 
@@ -545,8 +559,9 @@ func main() {
 	http.HandleFunc("/ws", server.handleWS)
 	http.HandleFunc("/turn-config", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		addr := cfg.TURNRelayIP + cfg.TURNPort
 		json.NewEncoder(w).Encode(map[string]any{
-			"urls":       []string{"turn:" + cfg.TURNRelayIP + cfg.TURNPort},
+			"urls":       []string{"turn:" + addr, "turn:" + addr + "?transport=tcp"},
 			"username":   cfg.TURNUsername,
 			"credential": cfg.TURNPassword,
 		})
