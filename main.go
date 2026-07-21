@@ -1,12 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"os"
 
-	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v3"
 
 	"github.com/qrave1/sozvon/internal/config"
 	"github.com/qrave1/sozvon/internal/signaling"
@@ -22,24 +23,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	app := &cli.App{
+	cmd := &cli.Command{
 		Name:  "sozvon",
 		Usage: "WebRTC signaling and TURN server",
-		Action: func(cCtx *cli.Context) error {
+		Action: func(ctx context.Context, c *cli.Command) error {
 			return runServer(cfg)
 		},
 		Commands: []*cli.Command{
 			{
 				Name:  "turn",
 				Usage: "Start TURN server",
-				Action: func(cCtx *cli.Context) error {
+				Action: func(ctx context.Context, cmd *cli.Command) error {
 					return turnserver.Start(cfg)
 				},
 			},
 		},
 	}
 
-	if err := app.Run(os.Args); err != nil {
+	if err := cmd.Run(context.Background(), os.Args); err != nil {
 		slog.Error("app failed", "error", err)
 		os.Exit(1)
 	}

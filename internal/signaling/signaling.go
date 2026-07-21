@@ -256,7 +256,11 @@ func (s *Server) readLoop(c *Client) {
 
 		if err := c.Conn.ReadJSON(&msg); err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
-				slog.Error("read error", "client", c.ID, "error", err)
+				if websocket.IsCloseError(err, websocket.CloseNoStatusReceived) {
+					slog.Info("client disconnected without close frame", "client", c.ID)
+				} else {
+					slog.Error("read error", "client", c.ID, "error", err)
+				}
 			}
 			return
 		}

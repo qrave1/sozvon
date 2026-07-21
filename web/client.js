@@ -127,7 +127,7 @@ function callApp() {
           this.setPeerMode(peerId, mode);
         } else if (state === "disconnected" || state === "failed") {
           this.setPeerMode(peerId, "reconnecting...");
-          try { pc.restartIce(); } catch (e) { /* ignore */ }
+          try { pc.restartIce(); } catch (err) { console.error("restart ice failed", err); }
         }
       };
 
@@ -150,7 +150,7 @@ function callApp() {
 
     async startMedia() {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error("getUserMedia недоступен: нужен https:// или http://localhost");
+        throw new Error("getUserMedia недоступен");
       }
 
       const stream = await navigator.mediaDevices.getUserMedia({
