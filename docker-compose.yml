@@ -7,16 +7,23 @@ services:
             - .env
         networks:
             - traefik
-        ports:
-            - "3478:3478/udp"
-            - "3478:3478/tcp"
         labels:
             - "traefik.enable=true"
             - "traefik.http.routers.app.rule=Host(`xxsm.ru`)"
             - "traefik.http.routers.app.entrypoints=websecure"
             - "traefik.http.routers.app.tls.certresolver=myresolver"
             - "traefik.http.services.app.loadbalancer.server.port=8000"
-            # Watchtower будет обновлять этот контейнер
+            - "com.centurylinklabs.watchtower.enable=true"
+
+    sozvon-turn:
+        image: ghcr.io/qrave1/sozvon:latest
+        container_name: sozvon-turn
+        restart: always
+        env_file:
+            - .env
+        network_mode: host
+        command: ["/app/build", "turn"]
+        labels:
             - "com.centurylinklabs.watchtower.enable=true"
 
     watchtower:
