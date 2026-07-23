@@ -172,14 +172,38 @@ function callApp() {
 
     async startMedia() {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error("getUserMedia недоступен");
+        return;
       }
 
-      const audio = this.audioInputId ? { deviceId: { exact: this.audioInputId } } : true;
-      const video = this.videoId ? { deviceId: { exact: this.videoId } } : true;
-      const stream = await navigator.mediaDevices.getUserMedia({ audio, video });
-      this.localStream = stream;
+      const stream = new MediaStream();
 
+      try {
+        if (this.videoId) {
+          const vs = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: this.videoId } } });
+          vs.getVideoTracks().forEach((t) => stream.addTrack(t));
+        } else {
+          const vs = await navigator.mediaDevices.getUserMedia({ video: true });
+          vs.getVideoTracks().forEach((t) => stream.addTrack(t));
+        }
+      } catch (err) {
+        console.warn("видео недоступно", err);
+        this.camOn = false;
+      }
+
+      try {
+        if (this.audioInputId) {
+          const as = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: this.audioInputId } } });
+          as.getAudioTracks().forEach((t) => stream.addTrack(t));
+        } else {
+          const as = await navigator.mediaDevices.getUserMedia({ audio: true });
+          as.getAudioTracks().forEach((t) => stream.addTrack(t));
+        }
+      } catch (err) {
+        console.warn("микрофон недоступен", err);
+        this.micOn = false;
+      }
+
+      this.localStream = stream;
       stream.getVideoTracks().forEach((t) => (t.enabled = this.camOn));
       stream.getAudioTracks().forEach((t) => (t.enabled = this.micOn));
 
@@ -212,9 +236,26 @@ function callApp() {
         this.localStream.getTracks().forEach((t) => t.stop());
       }
 
-      const audio = this.audioInputId ? { deviceId: { exact: this.audioInputId } } : true;
-      const video = this.videoId ? { deviceId: { exact: this.videoId } } : true;
-      const stream = await navigator.mediaDevices.getUserMedia({ audio, video });
+      const stream = new MediaStream();
+
+      if (kind === "videoinput" || kind === "audioinput") {
+        try {
+          const c = kind === "videoinput"
+            ? { video: this.videoId ? { deviceId: { exact: this.videoId } } : true }
+            : { audio: this.audioInputId ? { deviceId: { exact: this.audioInputId } } : true };
+          const s = await navigator.mediaDevices.getUserMedia(c);
+          s.getTracks().forEach((t) => stream.addTrack(t));
+        } catch (err) {
+          console.warn(`${kind} недоступен`, err);
+          if (kind === "videoinput") this.camOn = false;
+          if (kind === "audioinput") this.micOn = false;
+        }
+        // Keep the other kind's existing tracks
+        if (this.localStream) {
+          const keepKind = kind === "videoinput" ? "audio" : "video";
+          this.localStream.getTracks().filter((t) => t.kind === keepKind).forEach((t) => stream.addTrack(t));
+        }
+      }
 
       for (const pc of this.pcs.values()) {
         const senders = pc.getSenders();
@@ -257,17 +298,7 @@ function callApp() {
       this.status = "запрос камеры/микрофона...";
       this.myColor = colorFor(this.name || "me");
       this.initial = (this.name || "Я").slice(0, 1).toUpperCase();
-      try {
-        await this.startMedia();
-      } catch (err) {
-        let msg = "ошибка медиа: " + (err && err.name ? err.name : err);
-        if (err && err.name === "NotAllowedError") msg = "доступ к камере/микрофону запрещён";
-        if (err && err.name === "NotFoundError") msg = "камера/микрофон не найдены";
-        if (err && (err.message || "").includes("getUserMedia недоступен")) msg = err.message;
-        this.status = msg;
-        console.error(err);
-        return;
-      }
+      await this.startMedia();
 
       await this.loadIceServers();
 
