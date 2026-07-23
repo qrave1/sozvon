@@ -38,6 +38,7 @@ function callApp() {
     videoId: "",
     activeId: null,
     showSettings: false,
+    screenShare: false,
     devices: { audioinput: [], audiooutput: [], videoinput: [] },
 
     async init() {
@@ -316,7 +317,7 @@ function callApp() {
         this.send({
           type: "join",
           room,
-          data: { name: this.name, camOn: this.camOn, micOn: this.micOn },
+        data: { name: this.name, camOn: this.camOn, micOn: this.micOn, screenShare: this.screenShare },
         });
       };
 
@@ -344,7 +345,7 @@ function callApp() {
       ws.onopen = () => {
         this.connected = true;
         this.status = "в созвоне: " + this.room;
-        this.send({ type: "join", room: this.room, data: { name: this.name, camOn: this.camOn, micOn: this.micOn } });
+        this.send({ type: "join", room: this.room, data: { name: this.name, camOn: this.camOn, micOn: this.micOn, screenShare: this.screenShare } });
       };
       ws.onmessage = (ev) => {
         const msg = JSON.parse(ev.data);
@@ -457,7 +458,7 @@ function callApp() {
     broadcastState() {
       this.send({
         type: "state",
-        data: { name: this.name, camOn: this.camOn, micOn: this.micOn },
+        data: { name: this.name, camOn: this.camOn, micOn: this.micOn, screenShare: this.screenShare },
       });
     },
 
@@ -483,6 +484,10 @@ function callApp() {
     },
 
     async toggleCam() {
+      if (this.screenShare) {
+        await this.toggleScreen();
+        return;
+      }
       if (!this.localStream) return;
       const track = this.localStream.getVideoTracks()[0];
       if (!track) return;
@@ -490,6 +495,80 @@ function callApp() {
       this.camOn = track.enabled;
       if (this.pcs.size > 0) await this.negotiateAll();
       this.broadcastState();
+    },
+
+    async toggleScreen() {
+      if (this.screenShare) {
+        this.screenStream?.getTracks().forEach((t) => t.stop());
+        this.screenStream = null;
+        this.screenShare = false;
+        this.camOn = this._camWasOn ?? false;
+        await this.replaceVideoTrack();
+        this.broadcastState();
+        return;
+      }
+
+      if (!navigator.mediaDevices?.getDisplayMedia) return;
+      try {
+        const ss = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        this.screenStream = ss;
+        this.screenShare = true;
+        this._camWasOn = this.camOn;
+        this.camOn = true;
+
+        const screenTrack = ss.getVideoTracks()[0];
+        const oldVideo = this.localStream.getVideoTracks()[0];
+        if (oldVideo) this.localStream.removeTrack(oldVideo);
+        this.localStream.addTrack(screenTrack);
+
+        for (const pc of this.pcs.values()) {
+          const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+          if (sender) await sender.replaceTrack(screenTrack);
+        }
+
+        this.$nextTick(() => {
+          const v = document.getElementById("vid-local");
+          if (v) v.srcObject = this.localStream;
+        });
+
+        screenTrack.onended = async () => {
+          this.screenStream = null;
+          this.screenShare = false;
+          this.camOn = this._camWasOn;
+          await this.replaceVideoTrack();
+          this.broadcastState();
+        };
+
+        this.broadcastState();
+      } catch (err) {
+        console.warn("screen share failed", err);
+      }
+    },
+
+    async replaceVideoTrack() {
+      try {
+        const vc = this.videoId ? { deviceId: { exact: this.videoId } } : true;
+        const cs = await navigator.mediaDevices.getUserMedia({ video: vc });
+        const newTrack = cs.getVideoTracks()[0];
+        newTrack.enabled = this.camOn;
+
+        const oldVideo = this.localStream.getVideoTracks()[0];
+        if (oldVideo) this.localStream.removeTrack(oldVideo);
+        if (newTrack) this.localStream.addTrack(newTrack);
+
+        for (const pc of this.pcs.values()) {
+          const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+          if (sender) await sender.replaceTrack(newTrack);
+        }
+
+        this.$nextTick(() => {
+          const v = document.getElementById("vid-local");
+          if (v) v.srcObject = this.localStream;
+        });
+      } catch (err) {
+        console.warn("replace video track failed", err);
+        this.camOn = false;
+      }
     },
   };
 }
