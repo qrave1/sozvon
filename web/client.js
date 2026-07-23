@@ -36,6 +36,8 @@ function callApp() {
     audioInputId: "",
     audioOutputId: "",
     videoId: "",
+    activeId: null,
+    showSettings: false,
     devices: { audioinput: [], audiooutput: [], videoinput: [] },
 
     async init() {
@@ -178,26 +180,18 @@ function callApp() {
       const stream = new MediaStream();
 
       try {
-        if (this.videoId) {
-          const vs = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: this.videoId } } });
-          vs.getVideoTracks().forEach((t) => stream.addTrack(t));
-        } else {
-          const vs = await navigator.mediaDevices.getUserMedia({ video: true });
-          vs.getVideoTracks().forEach((t) => stream.addTrack(t));
-        }
+        const vc = this.videoId ? { deviceId: { exact: this.videoId } } : true;
+        const vs = await navigator.mediaDevices.getUserMedia({ video: vc });
+        vs.getVideoTracks().forEach((t) => stream.addTrack(t));
       } catch (err) {
         console.warn("видео недоступно", err);
         this.camOn = false;
       }
 
       try {
-        if (this.audioInputId) {
-          const as = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: this.audioInputId } } });
-          as.getAudioTracks().forEach((t) => stream.addTrack(t));
-        } else {
-          const as = await navigator.mediaDevices.getUserMedia({ audio: true });
-          as.getAudioTracks().forEach((t) => stream.addTrack(t));
-        }
+        const ac = this.audioInputId ? { deviceId: { exact: this.audioInputId } } : true;
+        const as = await navigator.mediaDevices.getUserMedia({ audio: ac });
+        as.getAudioTracks().forEach((t) => stream.addTrack(t));
       } catch (err) {
         console.warn("микрофон недоступен", err);
         this.micOn = false;
@@ -238,22 +232,29 @@ function callApp() {
 
       const stream = new MediaStream();
 
-      if (kind === "videoinput" || kind === "audioinput") {
+      if (kind === "videoinput") {
         try {
-          const c = kind === "videoinput"
-            ? { video: this.videoId ? { deviceId: { exact: this.videoId } } : true }
-            : { audio: this.audioInputId ? { deviceId: { exact: this.audioInputId } } : true };
-          const s = await navigator.mediaDevices.getUserMedia(c);
-          s.getTracks().forEach((t) => stream.addTrack(t));
+          const vc = this.videoId ? { deviceId: { exact: this.videoId } } : true;
+          const s = await navigator.mediaDevices.getUserMedia({ video: vc });
+          s.getVideoTracks().forEach((t) => stream.addTrack(t));
         } catch (err) {
-          console.warn(`${kind} недоступен`, err);
-          if (kind === "videoinput") this.camOn = false;
-          if (kind === "audioinput") this.micOn = false;
+          console.warn("видео недоступно", err);
+          this.camOn = false;
         }
-        // Keep the other kind's existing tracks
         if (this.localStream) {
-          const keepKind = kind === "videoinput" ? "audio" : "video";
-          this.localStream.getTracks().filter((t) => t.kind === keepKind).forEach((t) => stream.addTrack(t));
+          this.localStream.getAudioTracks().forEach((t) => stream.addTrack(t));
+        }
+      } else if (kind === "audioinput") {
+        try {
+          const ac = this.audioInputId ? { deviceId: { exact: this.audioInputId } } : true;
+          const s = await navigator.mediaDevices.getUserMedia({ audio: ac });
+          s.getAudioTracks().forEach((t) => stream.addTrack(t));
+        } catch (err) {
+          console.warn("микрофон недоступен", err);
+          this.micOn = false;
+        }
+        if (this.localStream) {
+          this.localStream.getVideoTracks().forEach((t) => stream.addTrack(t));
         }
       }
 
@@ -280,6 +281,10 @@ function callApp() {
       });
 
       if (this.pcs.size > 0) await this.negotiateAll();
+    },
+
+    selectId(id) {
+      this.activeId = this.activeId === id ? null : id;
     },
 
     send(obj) {

@@ -11,6 +11,10 @@
       font-family: system-ui, -apple-system, sans-serif;
       background: #0f1115;
       color: #e6e6e6;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
     }
     header {
       padding: 12px 16px;
@@ -42,16 +46,41 @@
     #status { margin-left: auto; font-size: 13px; opacity: .8; }
     #videos {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      grid-auto-rows: 1fr;
       gap: 10px;
       padding: 16px;
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
+    #videos.spotlight {
+      grid-template-columns: 1fr 200px;
+      grid-template-rows: 1fr;
+      grid-auto-rows: min-content;
+      overflow: hidden;
+    }
+    #videos.spotlight .tile.active-lg {
+      grid-column: 1;
+      grid-row: 1;
+      width: 100%;
+      height: 100%;
+    }
+    #videos.spotlight .tile.active-lg video {
+      object-fit: contain;
+      background: #0f1115;
+    }
+    #videos.spotlight .tile:not(.active-lg) {
+      grid-column: 2;
+      max-height: 130px;
+      aspect-ratio: 4 / 3;
     }
     .tile {
       position: relative;
       background: #000;
       border-radius: 10px;
       overflow: hidden;
-      aspect-ratio: 4 / 3;
+      cursor: pointer;
     }
     .tile video { width: 100%; height: 100%; object-fit: cover; background: #000; }
     .tile .label {
@@ -115,14 +144,15 @@
   <header>
     <input x-model="name" placeholder="Ваше имя" :disabled="connected" />
     <input x-model="room" placeholder="ID комнаты" :disabled="connected" />
-    <button x-show="!connected" @click="join()">Войти</button>
-    <button class="danger" x-show="connected" @click="leave()">Выйти</button>
-    <button :class="micOn ? '' : 'off'" x-text="micOn ? 'Микрофон: вкл' : 'Микрофон: выкл'" @click="toggleMic()"></button>
-    <button :class="camOn ? '' : 'off'" x-text="camOn ? 'Камера: вкл' : 'Камера: выкл'" @click="toggleCam()"></button>
+    <button x-show="!connected" @click="join()">➡ Войти</button>
+    <button class="danger" x-show="connected" @click="leave()">⬅ Выйти</button>
+    <button :class="micOn ? '' : 'off'" @click="toggleMic()" x-html="micOn ? '🎤 Микрофон' : '🔇 Микрофон'"></button>
+    <button :class="camOn ? '' : 'off'" @click="toggleCam()" x-html="camOn ? '📹 Камера' : '🚫 Камера'"></button>
+    <button @click="showSettings = !showSettings" :class="showSettings ? '' : 'off'" title="Настройки устройств">⚙️</button>
     <span id="status" x-text="status"></span>
   </header>
 
-  <div class="device-bar">
+  <div class="device-bar" x-show="showSettings" x-transition:enter.duration.200ms x-transition:leave.duration.150ms>
     <label>🎤
       <select x-model="audioInputId" @change="changeDevice('audioinput')" :disabled="connected">
         <template x-for="d in devices.audioinput" :key="d.deviceId">
@@ -146,8 +176,8 @@
     </label>
   </div>
 
-  <div id="videos">
-      <div class="tile" x-show="connected">
+  <div id="videos" :class="activeId ? 'spotlight' : ''">
+      <div class="tile" :class="activeId === 'local' ? 'active-lg' : ''" @click="selectId('local')" x-show="connected">
       <video id="vid-local" autoplay playsinline muted x-show="camOn"></video>
       <div class="avatar" x-show="!camOn" :style="'background:' + myColor" x-text="initial"></div>
       <div class="label">
@@ -157,7 +187,7 @@
     </div>
 
     <template x-for="p in peers" :key="p.id">
-      <div class="tile">
+      <div class="tile" :class="activeId === p.id ? 'active-lg' : ''" @click="selectId(p.id)">
         <video :id="'vid-' + p.id" autoplay playsinline x-show="p.camOn"></video>
         <div class="avatar" x-show="!p.camOn" :style="'background:' + p.color" x-text="p.initial"></div>
         <div class="label">
