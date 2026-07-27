@@ -10,6 +10,11 @@ function callApp() {
     "#1abc9c", "#e67e22", "#34495e", "#fd79a8", "#00cec9",
   ];
 
+  function getRoomFromUrl() {
+    const urlParams = new URLSearchParams(window.location.search);
+    return urlParams.get('room') || urlParams.get('id') || '';
+  }
+
   function colorFor(id) {
     let h = 0;
     for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
@@ -42,6 +47,9 @@ function callApp() {
     devices: { audioinput: [], audiooutput: [], videoinput: [] },
 
     async init() {
+      const roomFromUrl = getRoomFromUrl();
+      if (roomFromUrl) this.room = roomFromUrl;
+
       window.addEventListener("beforeunload", () => this.leave());
       await this.enumerateDevices();
       navigator.mediaDevices?.addEventListener("devicechange", () => {
@@ -282,6 +290,21 @@ function callApp() {
       });
 
       if (this.pcs.size > 0) await this.negotiateAll();
+    },
+
+    getRoomLink() {
+      return location.origin + location.pathname + "?room=" + encodeURIComponent(this.room);
+    },
+
+    share() {
+      const link = this.getRoomLink();
+      navigator.clipboard.writeText(link).then(() => {
+        const prev = this.status;
+        this.status = "ссылка скопирована!";
+        setTimeout(() => { this.status = prev; }, 2000);
+      }).catch(() => {
+        this.status = "не удалось скопировать";
+      });
     },
 
     selectId(id) {

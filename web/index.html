@@ -152,6 +152,7 @@
     <button :class="micOn ? '' : 'off'" @click="toggleMic()" x-html="micOn ? '🎤 Микрофон' : '🔇 Микрофон'"></button>
     <button :class="camOn ? '' : 'off'" @click="toggleCam()" x-html="camOn ? '📹 Камера' : '🚫 Камера'"></button>
     <button :class="screenShare ? '' : 'off'" x-show="connected" @click="toggleScreen()" x-html="screenShare ? '🖥 Экран: вкл' : '🖥 Экран'"></button>
+    <button x-show="connected" @click="share()">🔗 Поделиться</button>
     <button @click="showSettings = !showSettings" :class="showSettings ? '' : 'off'" title="Настройки устройств">⚙️</button>
     <span id="status" x-text="status"></span>
   </header>
