@@ -21,6 +21,13 @@ function callApp() {
     return COLORS[h % COLORS.length];
   }
 
+  // function setVideoBitrate(sender, bitrate) {
+  //   const params = sender.getParameters();
+  //   if (!params.encodings) params.encodings = [{}];
+  //   params.encodings.forEach((e) => { e.maxBitrate = bitrate; });
+  //   sender.setParameters(params).catch(() => {});
+  // }
+
   return {
     name: "",
     room: "",
@@ -130,6 +137,23 @@ function callApp() {
       if (patch.name) p.initial = patch.name.slice(0, 1).toUpperCase();
     },
 
+    // applyVideoRestrictions(pc) {
+    //   if (!pc.getTransceivers) return;
+    //   for (const tr of pc.getTransceivers()) {
+    //     if (tr.sender?.track?.kind !== "video") continue;
+    //     setVideoBitrate(tr.sender, 2000000);
+    //     if (tr.setCodecPreferences && RTCRtpReceiver.getCapabilities) {
+    //       const caps = RTCRtpReceiver.getCapabilities("video");
+    //       if (caps) {
+    //         const h264 = caps.codecs.filter((c) => c.mimeType.includes("H264"));
+    //         const other = caps.codecs.filter((c) => !c.mimeType.includes("H264"));
+    //         const preferred = [...h264, ...other];
+    //         try { tr.setCodecPreferences(preferred); } catch (_) {}
+    //       }
+    //     }
+    //   }
+    // },
+
     createPeer(peerId, initiator) {
       const pc = new RTCPeerConnection({ iceServers: this.iceServers });
 
@@ -138,6 +162,8 @@ function callApp() {
           pc.addTrack(track, this.localStream);
         }
       }
+
+      // this.applyVideoRestrictions(pc);
 
       pc.onicecandidate = (e) => {
         if (e.candidate) {
@@ -527,13 +553,14 @@ function callApp() {
         this.screenShare = false;
         this.camOn = this._camWasOn ?? false;
         await this.replaceVideoTrack();
+        await this.replaceAudioTrack();
         this.broadcastState();
         return;
       }
 
       if (!navigator.mediaDevices?.getDisplayMedia) return;
       try {
-        const ss = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        const ss = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
         this.screenStream = ss;
         this.screenShare = true;
         this._camWasOn = this.camOn;
@@ -544,9 +571,22 @@ function callApp() {
         if (oldVideo) this.localStream.removeTrack(oldVideo);
         this.localStream.addTrack(screenTrack);
 
+        const screenAudio = ss.getAudioTracks()[0];
+        if (screenAudio) {
+          this._savedMicTrack = this.localStream.getAudioTracks()[0] ?? null;
+          const oldAudio = this.localStream.getAudioTracks()[0];
+          if (oldAudio) this.localStream.removeTrack(oldAudio);
+          this.localStream.addTrack(screenAudio);
+        }
+
         for (const pc of this.pcs.values()) {
           const sender = pc.getSenders().find((s) => s.track?.kind === "video");
           if (sender) await sender.replaceTrack(screenTrack);
+
+          if (screenAudio) {
+            const audioSender = pc.getSenders().find((s) => s.track?.kind === "audio");
+            if (audioSender) await audioSender.replaceTrack(screenAudio);
+          }
         }
 
         this.$nextTick(() => {
@@ -559,6 +599,7 @@ function callApp() {
           this.screenShare = false;
           this.camOn = this._camWasOn;
           await this.replaceVideoTrack();
+          await this.replaceAudioTrack();
           this.broadcastState();
         };
 
@@ -591,6 +632,24 @@ function callApp() {
       } catch (err) {
         console.warn("replace video track failed", err);
         this.camOn = false;
+      }
+    },
+
+    async replaceAudioTrack() {
+      try {
+        const screenAudio = this.localStream.getAudioTracks()[0];
+        if (screenAudio) this.localStream.removeTrack(screenAudio);
+
+        const savedMic = this._savedMicTrack;
+        if (savedMic) this.localStream.addTrack(savedMic);
+        this._savedMicTrack = null;
+
+        for (const pc of this.pcs.values()) {
+          const sender = pc.getSenders().find((s) => s.track?.kind === "audio");
+          if (sender) await sender.replaceTrack(savedMic ?? null);
+        }
+      } catch (err) {
+        console.warn("replace audio track failed", err);
       }
     },
   };
