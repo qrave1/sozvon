@@ -46,10 +46,17 @@ func main() {
 	}
 }
 
+func noCache(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		next.ServeHTTP(w, r)
+	})
+}
+
 func runServer(cfg *config.Config) error {
 	server := signaling.NewServer()
 
-	http.Handle("/", http.FileServer(http.Dir("./web")))
+	http.Handle("/", noCache(http.FileServer(http.Dir("./web"))))
 	http.HandleFunc("/ws", server.HandleWS)
 
 	if cfg.TURN.RelayIP != "" {

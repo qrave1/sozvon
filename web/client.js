@@ -361,6 +361,16 @@ function callApp() {
       this.activeId = this.activeId === id ? null : id;
     },
 
+    fullscreen(id) {
+      const tile = document.getElementById("tile-" + id);
+      if (!tile) return;
+      if (document.fullscreenElement) {
+        document.exitFullscreen().catch(() => {});
+      } else {
+        tile.requestFullscreen().catch(() => {});
+      }
+    },
+
     send(obj) {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(JSON.stringify(obj));

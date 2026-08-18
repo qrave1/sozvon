@@ -113,6 +113,21 @@
       cursor: pointer;
       z-index: 2;
     }
+    .tile .peer-fullscreen {
+      position: absolute;
+      bottom: 6px; right: 8px;
+      padding: 2px 7px;
+      font-size: 12px;
+      background: rgba(0,0,0,.55);
+      border-radius: 4px;
+      border: none;
+      cursor: pointer;
+      z-index: 2;
+    }
+    .tile:fullscreen {
+      border-radius: 0;
+      background: #000;
+    }
     .tile .label .mic-off {
       margin-left: 4px;
       opacity: .9;
@@ -193,9 +208,10 @@
   </div>
 
   <div id="videos" :class="activeId ? 'spotlight' : ''">
-      <div class="tile" :class="activeId === 'local' ? 'active-lg' : ''" @click="selectId('local')" x-show="connected">
+      <div class="tile" id="tile-local" :class="activeId === 'local' ? 'active-lg' : ''" @click="selectId('local')" x-show="connected">
       <video id="vid-local" autoplay playsinline muted x-show="camOn"></video>
       <div class="avatar" x-show="!camOn" :style="'background:' + myColor" x-text="initial"></div>
+      <button class="peer-fullscreen" x-show="camOn" @click.stop="fullscreen('local')" title="Во весь экран">⛶</button>
       <div class="label">
         <span x-text="name || 'я'"></span>
         <span class="mic-off" x-show="!micOn" title="микрофон выключен">🔇</span>
@@ -203,11 +219,12 @@
     </div>
 
     <template x-for="p in peers" :key="p.id">
-      <div class="tile" :class="activeId === p.id ? 'active-lg' : ''" @click="selectId(p.id)">
+      <div class="tile" :id="'tile-' + p.id" :class="activeId === p.id ? 'active-lg' : ''" @click="selectId(p.id)">
         <video :id="'vid-' + p.id" autoplay playsinline x-show="p.camOn"></video>
         <div class="avatar" x-show="!p.camOn" :style="'background:' + p.color" x-text="p.initial"></div>
         <button class="peer-mute" :class="p.muted ? 'off' : ''" @click.stop="toggleMuteUser(p.id)"
                 x-html="p.muted ? '🔇' : '🔊'" :title="p.muted ? 'Включить звук для себя' : 'Выключить звук для себя'"></button>
+        <button class="peer-fullscreen" x-show="p.camOn" @click.stop="fullscreen(p.id)" title="Во весь экран">⛶</button>
         <div class="label">
           <span x-text="p.name || p.id.slice(0, 8)"></span>
           <span class="mic-off" x-show="!p.micOn" title="микрофон выключен">🔇</span>
