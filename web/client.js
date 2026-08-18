@@ -44,6 +44,7 @@ function callApp() {
     myId: null,
     iceServers: ICE_SERVERS,
     pcs: new Map(),
+    mutedPeers: new Set(),
 
     audioInputId: "",
     audioOutputId: "",
@@ -98,8 +99,29 @@ function callApp() {
     attachStream(id, stream) {
       this.$nextTick(() => {
         const video = document.getElementById("vid-" + id);
-        if (video && stream) video.srcObject = stream;
+        if (video && stream) {
+          video.srcObject = stream;
+          if (this.mutedPeers.has(id)) this.setRemoteMuted(id, true);
+        }
       });
+    },
+
+    setRemoteMuted(id, muted) {
+      const video = document.getElementById("vid-" + id);
+      if (!video?.srcObject) return;
+      video.srcObject.getAudioTracks().forEach((t) => (t.enabled = !muted));
+    },
+
+    toggleMuteUser(id) {
+      if (this.mutedPeers.has(id)) {
+        this.mutedPeers.delete(id);
+        this.setRemoteMuted(id, false);
+      } else {
+        this.mutedPeers.add(id);
+        this.setRemoteMuted(id, true);
+      }
+      const p = this.peers.find((x) => x.id === id);
+      if (p) p.muted = this.mutedPeers.has(id);
     },
 
     addPeer(id, info) {
@@ -112,12 +134,14 @@ function callApp() {
           color: colorFor(id),
           initial: (info?.name || id).slice(0, 1).toUpperCase(),
           mode: "",
+          muted: this.mutedPeers.has(id),
         });
       }
     },
 
     removePeer(id) {
       this.peers = this.peers.filter((p) => p.id !== id);
+      this.mutedPeers.delete(id);
       const pc = this.pcs.get(id);
       if (pc) {
         pc.close();

@@ -102,6 +102,17 @@
       padding: 2px 8px;
       border-radius: 4px;
     }
+    .tile .peer-mute {
+      position: absolute;
+      top: 6px; left: 8px;
+      padding: 2px 7px;
+      font-size: 12px;
+      background: rgba(0,0,0,.55);
+      border-radius: 4px;
+      border: none;
+      cursor: pointer;
+      z-index: 2;
+    }
     .tile .label .mic-off {
       margin-left: 4px;
       opacity: .9;
@@ -195,6 +206,8 @@
       <div class="tile" :class="activeId === p.id ? 'active-lg' : ''" @click="selectId(p.id)">
         <video :id="'vid-' + p.id" autoplay playsinline x-show="p.camOn"></video>
         <div class="avatar" x-show="!p.camOn" :style="'background:' + p.color" x-text="p.initial"></div>
+        <button class="peer-mute" :class="p.muted ? 'off' : ''" @click.stop="toggleMuteUser(p.id)"
+                x-html="p.muted ? '🔇' : '🔊'" :title="p.muted ? 'Включить звук для себя' : 'Выключить звук для себя'"></button>
         <div class="label">
           <span x-text="p.name || p.id.slice(0, 8)"></span>
           <span class="mic-off" x-show="!p.micOn" title="микрофон выключен">🔇</span>
