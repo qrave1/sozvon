@@ -47,6 +47,7 @@ function callApp() {
     mutedPeers: new Set(),
     pendingIce: new Map(),
     negotiating: false,
+    codecPref: "auto",
 
     audioInputId: "",
     audioOutputId: "",
@@ -192,6 +193,30 @@ function callApp() {
       }
     },
 
+    applyVideoCodecPrefs(pc) {
+      if (!pc.getTransceivers || !RTCRtpReceiver.getCapabilities) return;
+      const caps = RTCRtpReceiver.getCapabilities("video");
+      if (!caps?.codecs?.length) return;
+      const wanted = (this.codecPref || "").toLowerCase();
+      let codecs = caps.codecs.slice();
+      if (wanted && wanted !== "auto") {
+        codecs.sort((a, b) => {
+          const aHit = a.mimeType.toLowerCase().includes(wanted);
+          const bHit = b.mimeType.toLowerCase().includes(wanted);
+          return (bHit ? 1 : 0) - (aHit ? 1 : 0);
+        });
+      }
+      for (const tr of pc.getTransceivers()) {
+        if (tr.sender?.track?.kind !== "video") continue;
+        try { tr.setCodecPreferences(codecs); } catch (_) {}
+      }
+    },
+
+    changeCodec() {
+      for (const pc of this.pcs.values()) this.applyVideoCodecPrefs(pc);
+      if (this.connected && this.pcs.size > 0) this.negotiateAll();
+    },
+
     applyVideoBitrate(bitrate) {
       for (const pc of this.pcs.values()) {
         const sender = pc.getSenders().find((s) => s.track?.kind === "video");
@@ -211,6 +236,7 @@ function callApp() {
       }
 
       this.applyVideoRestrictions(pc);
+      this.applyVideoCodecPrefs(pc);
 
       pc.onicecandidate = (e) => {
         if (e.candidate) {

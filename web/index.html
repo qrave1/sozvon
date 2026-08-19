@@ -205,6 +205,15 @@
         </template>
       </select>
     </label>
+    <label>🎞 Кодек
+      <select x-model="codecPref" @change="changeCodec()">
+        <option value="auto">Авто</option>
+        <option value="vp8">VP8</option>
+        <option value="vp9">VP9</option>
+        <option value="h264">H264</option>
+        <option value="av1">AV1</option>
+      </select>
+    </label>
   </div>
 
   <div id="videos" :class="activeId ? 'spotlight' : ''">
