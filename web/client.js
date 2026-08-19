@@ -45,6 +45,8 @@ function callApp() {
     iceServers: ICE_SERVERS,
     pcs: new Map(),
     mutedPeers: new Set(),
+    pendingIce: new Map(),
+    negotiating: false,
 
     audioInputId: "",
     audioOutputId: "",
@@ -106,6 +108,26 @@ function callApp() {
       });
     },
 
+    queueIce(id, candidate) {
+      if (!this.pendingIce.has(id)) this.pendingIce.set(id, []);
+      this.pendingIce.get(id).push(candidate);
+    },
+
+    flushIceQueue(id) {
+      const queue = this.pendingIce.get(id);
+      if (!queue) return;
+      this.pendingIce.delete(id);
+      const pc = this.pcs.get(id);
+      if (!pc) return;
+      for (const c of queue) {
+        try {
+          pc.addIceCandidate(new RTCIceCandidate(c));
+        } catch (err) {
+          console.error("addIceCandidate failed", err);
+        }
+      }
+    },
+
     setRemoteMuted(id, muted) {
       const video = document.getElementById("vid-" + id);
       if (!video?.srcObject) return;
@@ -142,6 +164,7 @@ function callApp() {
     removePeer(id) {
       this.peers = this.peers.filter((p) => p.id !== id);
       this.mutedPeers.delete(id);
+      this.pendingIce.delete(id);
       const pc = this.pcs.get(id);
       if (pc) {
         pc.close();
@@ -180,6 +203,8 @@ function callApp() {
 
     createPeer(peerId, initiator) {
       const pc = new RTCPeerConnection({ iceServers: this.iceServers });
+      pc._polite = !initiator;
+      pc._makingOffer = false;
 
       if (this.localStream) {
         for (const track of this.localStream.getTracks()) {
@@ -218,12 +243,15 @@ function callApp() {
 
       if (initiator) {
         pc.onnegotiationneeded = async () => {
+          if (pc._makingOffer) return;
           try {
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            this.send({ type: "offer", to: peerId, data: offer });
+            pc._makingOffer = true;
+            await pc.setLocalDescription();
+            this.send({ type: "offer", to: peerId, data: pc.localDescription });
           } catch (err) {
             console.error("offer failed", err);
+          } finally {
+            pc._makingOffer = false;
           }
         };
       }
@@ -455,9 +483,25 @@ function callApp() {
         case "joined": {
           this.myId = msg.data.id;
           const peersList = msg.data.peers || [];
+          const alive = new Set(peersList.map((p) => p.id));
+          alive.add(this.myId);
+          for (const [id, pc] of this.pcs) {
+            if (!alive.has(id)) {
+              pc.close();
+              this.pcs.delete(id);
+              this.pendingIce.delete(id);
+            }
+          }
+          this.peers = this.peers.filter((p) => alive.has(p.id));
           for (const p of peersList) {
             const info = this.parseInfo(p);
             if (p.id === this.myId) continue;
+            const old = this.pcs.get(p.id);
+            if (old) {
+              old.close();
+              this.pcs.delete(p.id);
+              this.pendingIce.delete(p.id);
+            }
             this.addPeer(p.id, info);
             this.createPeer(p.id, true);
           }
@@ -492,29 +536,50 @@ function callApp() {
             this.addPeer(peerId, info);
             pc = this.createPeer(peerId, false);
           }
-          await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          this.send({ type: "answer", to: peerId, data: answer });
+          try {
+            const colliding = pc._makingOffer || pc.signalingState !== "stable";
+            if (!pc._polite) {
+              if (colliding) return;
+            } else if (colliding) {
+              await pc.setLocalDescription({ type: "rollback" });
+            }
+            await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            this.send({ type: "answer", to: peerId, data: answer });
+            this.flushIceQueue(peerId);
+          } catch (err) {
+            console.error("answer failed", err);
+          }
           break;
         }
 
         case "answer": {
           const peerId = msg.from;
           const pc = this.pcs.get(peerId);
-          if (pc) await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
+          if (pc) {
+            try {
+              await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
+            } catch (err) {
+              console.error("setRemoteDescription(answer) failed", err);
+            }
+            this.flushIceQueue(peerId);
+          }
           break;
         }
 
         case "candidate": {
           const peerId = msg.from;
+          if (!msg.data) break;
           const pc = this.pcs.get(peerId);
-          if (pc && msg.data) {
-            try {
-              await pc.addIceCandidate(new RTCIceCandidate(msg.data));
-            } catch (err) {
-              console.error("addIceCandidate failed", err);
-            }
+          if (!pc || !pc.remoteDescription) {
+            this.queueIce(peerId, msg.data);
+            break;
+          }
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(msg.data));
+          } catch (err) {
+            console.error("addIceCandidate failed", err);
           }
           break;
         }
@@ -528,6 +593,7 @@ function callApp() {
       }
       for (const pc of this.pcs.values()) pc.close();
       this.pcs.clear();
+      this.pendingIce.clear();
       if (this.localStream) {
         this.localStream.getTracks().forEach((t) => t.stop());
         this.localStream = null;
@@ -546,14 +612,20 @@ function callApp() {
     },
 
     async negotiateAll() {
-      for (const [peerId, pc] of this.pcs) {
-        try {
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          this.send({ type: "offer", to: peerId, data: offer });
-        } catch (err) {
-          console.error("renegotiate failed", err);
+      if (this.negotiating) return;
+      this.negotiating = true;
+      try {
+        for (const [peerId, pc] of this.pcs) {
+          try {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            this.send({ type: "offer", to: peerId, data: offer });
+          } catch (err) {
+            console.error("renegotiate failed", err);
+          }
         }
+      } finally {
+        this.negotiating = false;
       }
     },
 
@@ -576,7 +648,6 @@ function callApp() {
       if (!track) return;
       track.enabled = !track.enabled;
       this.camOn = track.enabled;
-      if (this.pcs.size > 0) await this.negotiateAll();
       this.broadcastState();
     },
 
