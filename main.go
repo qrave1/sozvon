@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/urfave/cli/v3"
 
@@ -61,9 +63,10 @@ func runServer(cfg *config.Config) error {
 
 	if cfg.TURN.RelayIP != "" {
 		http.HandleFunc("/turn-config", func(w http.ResponseWriter, r *http.Request) {
+			addr := net.JoinHostPort(cfg.TURN.RelayIP, strings.TrimPrefix(cfg.TURN.Port, ":"))
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{
-				"urls":       []string{"turn:" + cfg.TURN.RelayIP, "turn:" + cfg.TURN.RelayIP + "?transport=tcp"},
+				"urls":       []string{"turn:" + addr, "turn:" + addr + "?transport=tcp"},
 				"username":   cfg.TURN.Username,
 				"credential": cfg.TURN.Password,
 			})

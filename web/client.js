@@ -21,12 +21,12 @@ function callApp() {
     return COLORS[h % COLORS.length];
   }
 
-  // function setVideoBitrate(sender, bitrate) {
-  //   const params = sender.getParameters();
-  //   if (!params.encodings) params.encodings = [{}];
-  //   params.encodings.forEach((e) => { e.maxBitrate = bitrate; });
-  //   sender.setParameters(params).catch(() => {});
-  // }
+  function setVideoBitrate(sender, bitrate) {
+    const params = sender.getParameters();
+    if (!params.encodings) params.encodings = [{}];
+    params.encodings.forEach((e) => { e.maxBitrate = bitrate; });
+    sender.setParameters(params).catch(() => {});
+  }
 
   return {
     name: "",
@@ -161,22 +161,22 @@ function callApp() {
       if (patch.name) p.initial = patch.name.slice(0, 1).toUpperCase();
     },
 
-    // applyVideoRestrictions(pc) {
-    //   if (!pc.getTransceivers) return;
-    //   for (const tr of pc.getTransceivers()) {
-    //     if (tr.sender?.track?.kind !== "video") continue;
-    //     setVideoBitrate(tr.sender, 2000000);
-    //     if (tr.setCodecPreferences && RTCRtpReceiver.getCapabilities) {
-    //       const caps = RTCRtpReceiver.getCapabilities("video");
-    //       if (caps) {
-    //         const h264 = caps.codecs.filter((c) => c.mimeType.includes("H264"));
-    //         const other = caps.codecs.filter((c) => !c.mimeType.includes("H264"));
-    //         const preferred = [...h264, ...other];
-    //         try { tr.setCodecPreferences(preferred); } catch (_) {}
-    //       }
-    //     }
-    //   }
-    // },
+    applyVideoRestrictions(pc) {
+      if (!pc.getTransceivers) return;
+      for (const tr of pc.getTransceivers()) {
+        if (tr.sender?.track?.kind !== "video") continue;
+        setVideoBitrate(tr.sender, 2000000);
+        if (tr.setCodecPreferences && RTCRtpReceiver.getCapabilities) {
+          const caps = RTCRtpReceiver.getCapabilities("video");
+          if (caps) {
+            const h264 = caps.codecs.filter((c) => c.mimeType.includes("H264"));
+            const other = caps.codecs.filter((c) => !c.mimeType.includes("H264"));
+            const preferred = [...h264, ...other];
+            try { tr.setCodecPreferences(preferred); } catch (_) {}
+          }
+        }
+      }
+    },
 
     createPeer(peerId, initiator) {
       const pc = new RTCPeerConnection({ iceServers: this.iceServers });
@@ -187,7 +187,7 @@ function callApp() {
         }
       }
 
-      // this.applyVideoRestrictions(pc);
+      this.applyVideoRestrictions(pc);
 
       pc.onicecandidate = (e) => {
         if (e.candidate) {
