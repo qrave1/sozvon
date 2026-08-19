@@ -665,12 +665,24 @@ function callApp() {
       }
 
       if (!navigator.mediaDevices?.getDisplayMedia) return;
+      let ss;
       try {
-        const ss = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+        ss = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      } catch (err) {
+        try {
+          ss = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        } catch (err2) {
+          console.warn("screen share failed", err2);
+          this.status = "доступ к экрану не получен";
+          return;
+        }
+      }
+      try {
         this.screenStream = ss;
         this.screenShare = true;
         this._camWasOn = this.camOn;
         this.camOn = true;
+        this.watchScreenFrames();
 
         const screenTrack = ss.getVideoTracks()[0];
         const oldVideo = this.localStream.getVideoTracks()[0];
@@ -724,6 +736,19 @@ function callApp() {
       } catch (err) {
         console.warn("screen share failed", err);
       }
+    },
+
+    watchScreenFrames() {
+      setTimeout(() => {
+        if (!this.screenShare) return;
+        const v = document.getElementById("vid-local");
+        if (v && !v.videoWidth) {
+          const surface = this.screenStream?.getVideoTracks()[0]?.getSettings?.().displaySurface;
+          this.status = surface === "monitor"
+            ? "экран передаётся чёрным — попробуйте другой монитор/вкладку"
+            : "экран передаётся чёрным — делитесь всем экраном, а не окном";
+        }
+      }, 2500);
     },
 
     async replaceVideoTrack() {
