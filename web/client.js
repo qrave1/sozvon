@@ -189,15 +189,13 @@ function callApp() {
       for (const tr of pc.getTransceivers()) {
         if (tr.sender?.track?.kind !== "video") continue;
         setVideoBitrate(tr.sender, 2000000);
-        if (tr.setCodecPreferences && RTCRtpReceiver.getCapabilities) {
-          const caps = RTCRtpReceiver.getCapabilities("video");
-          if (caps) {
-            const h264 = caps.codecs.filter((c) => c.mimeType.includes("H264"));
-            const other = caps.codecs.filter((c) => !c.mimeType.includes("H264"));
-            const preferred = [...h264, ...other];
-            try { tr.setCodecPreferences(preferred); } catch (_) {}
-          }
-        }
+      }
+    },
+
+    applyVideoBitrate(bitrate) {
+      for (const pc of this.pcs.values()) {
+        const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+        if (sender) setVideoBitrate(sender, bitrate);
       }
     },
 
@@ -305,69 +303,71 @@ function callApp() {
       });
     },
 
+    acquireTrack(kind) {
+      const isVideo = kind === "video";
+      const opts = isVideo
+        ? { video: this.videoId ? { deviceId: { exact: this.videoId } } : true }
+        : { audio: this.audioInputId ? { deviceId: { exact: this.audioInputId } } : true };
+      return navigator.mediaDevices.getUserMedia(opts).then((s) => {
+        s.getTracks().forEach((t) => { if (t.kind !== kind) t.stop(); });
+        return s.getTracks()[0] ?? null;
+      });
+    },
+
     async changeDevice(kind) {
       if (kind === "audiooutput") {
         this.applyAudioOutput();
         return;
       }
 
-      if (!this.connected) return;
-
-      if (this.localStream) {
-        this.localStream.getTracks().forEach((t) => t.stop());
+      if (kind === "videoinput" && this.screenShare) {
+        this.status = "для смены камеры остановите демонстрацию экрана";
+        return;
       }
 
-      const stream = new MediaStream();
+      if (!this.localStream) return;
 
-      if (kind === "videoinput") {
-        try {
-          const vc = this.videoId ? { deviceId: { exact: this.videoId } } : true;
-          const s = await navigator.mediaDevices.getUserMedia({ video: vc });
-          s.getVideoTracks().forEach((t) => stream.addTrack(t));
-        } catch (err) {
-          console.warn("видео недоступно", err);
-          this.camOn = false;
-        }
-        if (this.localStream) {
-          this.localStream.getAudioTracks().forEach((t) => stream.addTrack(t));
-        }
-      } else if (kind === "audioinput") {
-        try {
-          const ac = this.audioInputId ? { deviceId: { exact: this.audioInputId } } : true;
-          const s = await navigator.mediaDevices.getUserMedia({ audio: ac });
-          s.getAudioTracks().forEach((t) => stream.addTrack(t));
-        } catch (err) {
-          console.warn("микрофон недоступен", err);
-          this.micOn = false;
-        }
-        if (this.localStream) {
-          this.localStream.getVideoTracks().forEach((t) => stream.addTrack(t));
-        }
+      const trackKind = kind === "videoinput" ? "video" : "audio";
+      let newTrack = null;
+      try {
+        newTrack = await this.acquireTrack(trackKind);
+      } catch (err) {
+        console.warn(trackKind + " недоступно", err);
+        if (trackKind === "video") this.camOn = false;
+        if (trackKind === "audio") this.micOn = false;
+        return;
       }
+      if (!newTrack) return;
 
+      const old = this.localStream.getTracks().find((t) => t.kind === trackKind);
+      if (old) {
+        old.stop();
+        this.localStream.removeTrack(old);
+      }
+      newTrack.enabled = trackKind === "video" ? this.camOn : this.micOn;
+      this.localStream.addTrack(newTrack);
+
+      let added = false;
       for (const pc of this.pcs.values()) {
-        const senders = pc.getSenders();
-        for (const newTrack of stream.getTracks()) {
-          const sender = senders.find((s) => s.track?.kind === newTrack.kind);
+        const sender = pc.getSenders().find((s) => s.track?.kind === trackKind);
+        try {
           if (sender) {
             await sender.replaceTrack(newTrack);
           } else {
-            pc.addTrack(newTrack, stream);
+            pc.addTrack(newTrack, this.localStream);
+            added = true;
           }
+        } catch (err) {
+          console.error("replaceTrack failed", err);
         }
       }
-
-      stream.getVideoTracks().forEach((t) => (t.enabled = this.camOn));
-      stream.getAudioTracks().forEach((t) => (t.enabled = this.micOn));
-
-      this.localStream = stream;
+      if (added) await this.negotiateAll();
 
       this.$nextTick(() => {
         const v = document.getElementById("vid-local");
-        if (v) v.srcObject = stream;
+        if (v) v.srcObject = this.localStream;
+        this.applyAudioOutput();
       });
-
-      if (this.pcs.size > 0) await this.negotiateAll();
     },
 
     getRoomLink() {
@@ -657,6 +657,7 @@ function callApp() {
         this.screenStream = null;
         this.screenShare = false;
         this.camOn = this._camWasOn ?? false;
+        this.applyVideoBitrate(2000000);
         await this.replaceVideoTrack();
         await this.replaceAudioTrack();
         this.broadcastState();
@@ -675,6 +676,8 @@ function callApp() {
         const oldVideo = this.localStream.getVideoTracks()[0];
         if (oldVideo) this.localStream.removeTrack(oldVideo);
         this.localStream.addTrack(screenTrack);
+        screenTrack.contentHint = "detail";
+        this.applyVideoBitrate(4000000);
 
         const screenAudio = ss.getAudioTracks()[0];
         if (screenAudio) {
@@ -685,12 +688,20 @@ function callApp() {
         }
 
         for (const pc of this.pcs.values()) {
-          const sender = pc.getSenders().find((s) => s.track?.kind === "video");
-          if (sender) await sender.replaceTrack(screenTrack);
+          try {
+            const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+            if (sender) await sender.replaceTrack(screenTrack);
+          } catch (err) {
+            console.error("screen replaceTrack(video) failed", err);
+          }
 
           if (screenAudio) {
-            const audioSender = pc.getSenders().find((s) => s.track?.kind === "audio");
-            if (audioSender) await audioSender.replaceTrack(screenAudio);
+            try {
+              const audioSender = pc.getSenders().find((s) => s.track?.kind === "audio");
+              if (audioSender) await audioSender.replaceTrack(screenAudio);
+            } catch (err) {
+              console.error("screen replaceTrack(audio) failed", err);
+            }
           }
         }
 
@@ -703,6 +714,7 @@ function callApp() {
           this.screenStream = null;
           this.screenShare = false;
           this.camOn = this._camWasOn;
+          this.applyVideoBitrate(2000000);
           await this.replaceVideoTrack();
           await this.replaceAudioTrack();
           this.broadcastState();
@@ -720,6 +732,7 @@ function callApp() {
         const cs = await navigator.mediaDevices.getUserMedia({ video: vc });
         const newTrack = cs.getVideoTracks()[0];
         newTrack.enabled = this.camOn;
+        newTrack.contentHint = "motion";
 
         const oldVideo = this.localStream.getVideoTracks()[0];
         if (oldVideo) this.localStream.removeTrack(oldVideo);

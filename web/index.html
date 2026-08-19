@@ -185,21 +185,21 @@
 
   <div class="device-bar" x-show="showSettings" x-transition:enter.duration.200ms x-transition:leave.duration.150ms>
     <label>🎤
-      <select x-model="audioInputId" @change="changeDevice('audioinput')" :disabled="connected">
+      <select x-model="audioInputId" @change="changeDevice('audioinput')">
         <template x-for="d in devices.audioinput" :key="d.deviceId">
           <option :value="d.deviceId" x-text="d.label || d.deviceId.slice(0,12) + '…'"></option>
         </template>
       </select>
     </label>
     <label>🔊
-      <select x-model="audioOutputId" @change="changeDevice('audiooutput')" :disabled="connected">
+      <select x-model="audioOutputId" @change="changeDevice('audiooutput')">
         <template x-for="d in devices.audiooutput" :key="d.deviceId">
           <option :value="d.deviceId" x-text="d.label || d.deviceId.slice(0,12) + '…'"></option>
         </template>
       </select>
     </label>
     <label>📷
-      <select x-model="videoId" @change="changeDevice('videoinput')" :disabled="connected">
+      <select x-model="videoId" @change="changeDevice('videoinput')">
         <template x-for="d in devices.videoinput" :key="d.deviceId">
           <option :value="d.deviceId" x-text="d.label || d.deviceId.slice(0,12) + '…'"></option>
         </template>
