@@ -10,6 +10,10 @@ function callApp() {
     "#1abc9c", "#e67e22", "#34495e", "#fd79a8", "#00cec9",
   ];
 
+  const MAX_RECONNECT_ATTEMPTS = 5;
+  const RECONNECT_BASE_DELAY_MS = 1000;
+  const RECONNECT_MAX_DELAY_MS = 15000;
+
   function getRoomFromUrl() {
     const urlParams = new URLSearchParams(window.location.search);
     return urlParams.get('room') || urlParams.get('id') || '';
@@ -46,7 +50,8 @@ function callApp() {
     pcs: new Map(),
     mutedPeers: new Set(),
     pendingIce: new Map(),
-    negotiating: false,
+    reconnectAttempts: 0,
+    reconnectTimer: null,
     codecPref: "auto",
 
     audioInputId: "",
@@ -213,8 +218,22 @@ function callApp() {
     },
 
     changeCodec() {
-      for (const pc of this.pcs.values()) this.applyVideoCodecPrefs(pc);
-      if (this.connected && this.pcs.size > 0) this.negotiateAll();
+      for (const [peerId, pc] of this.pcs) {
+        this.applyVideoCodecPrefs(pc);
+        if (this.connected) this.makeOffer(peerId, pc);
+      }
+    },
+
+    async makeOffer(peerId, pc) {
+      try {
+        pc._makingOffer = true;
+        await pc.setLocalDescription();
+        this.send({ type: "offer", to: peerId, data: pc.localDescription });
+      } catch (err) {
+        console.error("offer failed", err);
+      } finally {
+        pc._makingOffer = false;
+      }
     },
 
     applyVideoBitrate(bitrate) {
@@ -228,6 +247,7 @@ function callApp() {
       const pc = new RTCPeerConnection({ iceServers: this.iceServers });
       pc._polite = !initiator;
       pc._makingOffer = false;
+      pc._ignoreOffer = false;
 
       if (this.localStream) {
         for (const track of this.localStream.getTracks()) {
@@ -265,20 +285,7 @@ function callApp() {
 
       this.pcs.set(peerId, pc);
 
-      if (initiator) {
-        pc.onnegotiationneeded = async () => {
-          if (pc._makingOffer) return;
-          try {
-            pc._makingOffer = true;
-            await pc.setLocalDescription();
-            this.send({ type: "offer", to: peerId, data: pc.localDescription });
-          } catch (err) {
-            console.error("offer failed", err);
-          } finally {
-            pc._makingOffer = false;
-          }
-        };
-      }
+      pc.onnegotiationneeded = () => this.makeOffer(peerId, pc);
 
       return pc;
     },
@@ -373,7 +380,6 @@ function callApp() {
       newTrack.enabled = trackKind === "video" ? this.camOn : this.micOn;
       this.localStream.addTrack(newTrack);
 
-      let added = false;
       for (const pc of this.pcs.values()) {
         const sender = pc.getSenders().find((s) => s.track?.kind === trackKind);
         try {
@@ -381,13 +387,11 @@ function callApp() {
             await sender.replaceTrack(newTrack);
           } else {
             pc.addTrack(newTrack, this.localStream);
-            added = true;
           }
         } catch (err) {
           console.error("replaceTrack failed", err);
         }
       }
-      if (added) await this.negotiateAll();
 
       this.$nextTick(() => {
         const v = document.getElementById("vid-local");
@@ -443,53 +447,68 @@ function callApp() {
       this.initial = (this.name || "Я").slice(0, 1).toUpperCase();
       await this.startMedia();
 
+      this.reconnectAttempts = 0;
+      await this.connect();
+    },
+
+    async connect() {
       await this.loadIceServers();
 
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      this.ws = new WebSocket(`${proto}://${location.host}/ws`);
+      const ws = new WebSocket(`${proto}://${location.host}/ws`);
 
-      this.ws.onopen = () => {
+      ws.onopen = () => {
         this.connected = true;
-        this.status = "в созвоне: " + room;
+        this.status = "в созвоне: " + this.room;
         this.send({
           type: "join",
-          room,
-        data: { name: this.name, camOn: this.camOn, micOn: this.micOn, screenShare: this.screenShare },
+          room: this.room,
+          data: { name: this.name, camOn: this.camOn, micOn: this.micOn, screenShare: this.screenShare },
         });
       };
 
-      this.ws.onclose = () => this.handleClose();
+      ws.onclose = () => this.handleClose();
+      ws.onmessage = (ev) => this.handleWsMessage(ev);
 
-      this.ws.onmessage = async (ev) => {
-        const msg = JSON.parse(ev.data);
-        await this.handleMessage(msg);
-      };
+      this.ws = ws;
+    },
+
+    handleWsMessage(ev) {
+      let msg;
+      try {
+        msg = JSON.parse(ev.data);
+      } catch (err) {
+        console.warn("malformed signaling message", err);
+        return;
+      }
+      this.handleMessage(msg).catch((err) => console.error("message handling failed", err));
     },
 
     handleClose() {
       this.connected = false;
-      if (this.room && this.myId) {
-        this.status = "соединение потеряно, переподключение...";
-        setTimeout(() => this.reconnect(), 2000);
-      } else {
+      if (!this.room || !this.myId) {
         this.status = "соединение закрыто";
+        return;
       }
+      this.scheduleReconnect();
     },
 
-    async reconnect() {
-      const proto = location.protocol === "https:" ? "wss" : "ws";
-      const ws = new WebSocket(`${proto}://${location.host}/ws`);
-      ws.onopen = () => {
-        this.connected = true;
-        this.status = "в созвоне: " + this.room;
-        this.send({ type: "join", room: this.room, data: { name: this.name, camOn: this.camOn, micOn: this.micOn, screenShare: this.screenShare } });
-      };
-      ws.onmessage = (ev) => {
-        const msg = JSON.parse(ev.data);
-        this.handleMessage(msg);
-      };
-      ws.onclose = () => this.handleClose();
-      this.ws = ws;
+    scheduleReconnect() {
+      if (this.reconnectTimer) return;
+      const attempt = this.reconnectAttempts + 1;
+      if (attempt > MAX_RECONNECT_ATTEMPTS) {
+        this.teardown();
+        this.status = "не удалось восстановить соединение";
+        return;
+      }
+      this.reconnectAttempts = attempt;
+      const delay = Math.min(RECONNECT_BASE_DELAY_MS * 2 ** (attempt - 1), RECONNECT_MAX_DELAY_MS);
+      this.status = `соединение потеряно, переподключение (${attempt}/${MAX_RECONNECT_ATTEMPTS})...`;
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = null;
+        if (!this.room) return;
+        this.connect();
+      }, delay);
     },
 
     parseInfo(raw) {
@@ -508,6 +527,7 @@ function callApp() {
       switch (msg.type) {
         case "joined": {
           this.myId = msg.data.id;
+          this.reconnectAttempts = 0;
           const peersList = msg.data.peers || [];
           const alive = new Set(peersList.map((p) => p.id));
           alive.add(this.myId);
@@ -558,15 +578,14 @@ function callApp() {
           const peerId = msg.from;
           let pc = this.pcs.get(peerId);
           if (!pc) {
-            const info = this.parseInfo(msg.data);
-            this.addPeer(peerId, info);
+            this.addPeer(peerId, {});
             pc = this.createPeer(peerId, false);
           }
           try {
             const colliding = pc._makingOffer || pc.signalingState !== "stable";
-            if (!pc._polite) {
-              if (colliding) return;
-            } else if (colliding) {
+            pc._ignoreOffer = !pc._polite && colliding;
+            if (pc._ignoreOffer) break;
+            if (colliding) {
               await pc.setLocalDescription({ type: "rollback" });
             }
             await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
@@ -612,10 +631,17 @@ function callApp() {
       }
     },
 
-    leave() {
+    teardown() {
+      if (this.reconnectTimer) {
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+      }
       if (this.ws) {
-        this.ws.close();
+        const ws = this.ws;
         this.ws = null;
+        ws.onclose = null;
+        ws.onmessage = null;
+        ws.close();
       }
       for (const pc of this.pcs.values()) pc.close();
       this.pcs.clear();
@@ -627,6 +653,11 @@ function callApp() {
       this.peers = [];
       this.myId = null;
       this.connected = false;
+      this.reconnectAttempts = 0;
+    },
+
+    leave() {
+      this.teardown();
       this.status = "не подключено";
     },
 
@@ -635,24 +666,6 @@ function callApp() {
         type: "state",
         data: { name: this.name, camOn: this.camOn, micOn: this.micOn, screenShare: this.screenShare },
       });
-    },
-
-    async negotiateAll() {
-      if (this.negotiating) return;
-      this.negotiating = true;
-      try {
-        for (const [peerId, pc] of this.pcs) {
-          try {
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            this.send({ type: "offer", to: peerId, data: offer });
-          } catch (err) {
-            console.error("renegotiate failed", err);
-          }
-        }
-      } finally {
-        this.negotiating = false;
-      }
     },
 
     async toggleMic() {
