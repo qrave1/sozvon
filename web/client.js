@@ -13,6 +13,21 @@ function callApp() {
   const MAX_RECONNECT_ATTEMPTS = 5;
   const RECONNECT_BASE_DELAY_MS = 1000;
   const RECONNECT_MAX_DELAY_MS = 15000;
+  const PREFS_KEY = "sozvon.prefs";
+
+  function loadPrefs() {
+    try {
+      return JSON.parse(localStorage.getItem(PREFS_KEY)) || {};
+    } catch {
+      return {};
+    }
+  }
+
+  function savePrefs(prefs) {
+    try {
+      localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+    } catch {}
+  }
 
   function getRoomFromUrl() {
     const urlParams = new URLSearchParams(window.location.search);
@@ -31,6 +46,11 @@ function callApp() {
     params.encodings.forEach((e) => { e.maxBitrate = bitrate; });
     sender.setParameters(params).catch(() => {});
   }
+
+  let audioCtx = null;
+  let speakTimer = null;
+  let notifyTimer = null;
+  const analysers = new Map();
 
   return {
     name: "",
@@ -60,17 +80,50 @@ function callApp() {
     activeId: null,
     showSettings: false,
     screenShare: false,
+    speaking: false,
+    spotManual: false,
+    spotAuto: false,
     devices: { audioinput: [], audiooutput: [], videoinput: [] },
 
     async init() {
-      const roomFromUrl = getRoomFromUrl();
-      if (roomFromUrl) this.room = roomFromUrl;
+      const prefs = loadPrefs();
+      if (prefs.name) this.name = prefs.name;
+      if (prefs.codecPref) this.codecPref = prefs.codecPref;
+      if (prefs.audioInputId) this.audioInputId = prefs.audioInputId;
+      if (prefs.audioOutputId) this.audioOutputId = prefs.audioOutputId;
+      if (prefs.videoId) this.videoId = prefs.videoId;
+      if (!getRoomFromUrl() && prefs.room) this.room = prefs.room;
+
+      ["name", "room", "codecPref", "audioInputId", "audioOutputId", "videoId"].forEach((k) =>
+        this.$watch(k, () => this.persist())
+      );
 
       window.addEventListener("beforeunload", () => this.leave());
+      window.addEventListener("keydown", (e) => this.onKeydown(e));
       await this.enumerateDevices();
       navigator.mediaDevices?.addEventListener("devicechange", () => {
         this.enumerateDevices();
       });
+    },
+
+    persist() {
+      savePrefs({
+        name: this.name,
+        room: this.room,
+        codecPref: this.codecPref,
+        audioInputId: this.audioInputId,
+        audioOutputId: this.audioOutputId,
+        videoId: this.videoId,
+      });
+    },
+
+    onKeydown(e) {
+      if (e.repeat) return;
+      const tag = e.target?.tagName;
+      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+      const k = e.key.toLowerCase();
+      if (k === "m" || k === "ь") this.toggleMic();
+      else if (k === "v" || k === "м") this.toggleCam();
     },
 
     async enumerateDevices() {
@@ -163,6 +216,7 @@ function callApp() {
           initial: (info?.name || id).slice(0, 1).toUpperCase(),
           mode: "",
           muted: this.mutedPeers.has(id),
+          speaking: false,
         });
       }
     },
@@ -171,6 +225,7 @@ function callApp() {
       this.peers = this.peers.filter((p) => p.id !== id);
       this.mutedPeers.delete(id);
       this.pendingIce.delete(id);
+      this.stopAudioAnalysis(id);
       const pc = this.pcs.get(id);
       if (pc) {
         pc.close();
@@ -267,6 +322,7 @@ function callApp() {
       pc.ontrack = (e) => {
         const [stream] = e.streams;
         this.attachStream(peerId, stream);
+        this.setupAudioAnalysis(peerId, stream);
       };
 
       pc.oniceconnectionstatechange = () => {
@@ -291,28 +347,40 @@ function callApp() {
     },
 
     async startMedia() {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        this.notify("браузер не поддерживает захват камеры и микрофона");
         return;
       }
 
       const stream = new MediaStream();
 
+      let combined = null;
       try {
-        const vc = this.videoId ? { deviceId: { exact: this.videoId } } : true;
-        const vs = await navigator.mediaDevices.getUserMedia({ video: vc });
-        vs.getVideoTracks().forEach((t) => stream.addTrack(t));
+        combined = await navigator.mediaDevices.getUserMedia({
+          video: this.videoId ? { deviceId: { exact: this.videoId } } : true,
+          audio: this.audioInputId ? { deviceId: { exact: this.audioInputId } } : true,
+        });
       } catch (err) {
-        console.warn("видео недоступно", err);
-        this.camOn = false;
+        console.warn("совместный запрос медиа не удался", err);
       }
 
-      try {
-        const ac = this.audioInputId ? { deviceId: { exact: this.audioInputId } } : true;
-        const as = await navigator.mediaDevices.getUserMedia({ audio: ac });
-        as.getAudioTracks().forEach((t) => stream.addTrack(t));
-      } catch (err) {
-        console.warn("микрофон недоступен", err);
-        this.micOn = false;
+      if (combined) {
+        combined.getTracks().forEach((t) => stream.addTrack(t));
+      } else {
+        for (const kind of ["video", "audio"]) {
+          try {
+            stream.addTrack(await this.acquireTrack(kind));
+          } catch (err) {
+            if (kind === "video") this.camOn = false;
+            else this.micOn = false;
+            this.notify(kind === "video" ? "камера недоступна" : "микрофон недоступен");
+          }
+        }
+      }
+
+      if (!stream.getTracks().length) {
+        this.notify("не удалось получить доступ к камере и микрофону");
+        return;
       }
 
       this.localStream = stream;
@@ -321,6 +389,7 @@ function callApp() {
 
       this.myColor = colorFor(this.name || "me");
       this.initial = (this.name || "Я").slice(0, 1).toUpperCase();
+      this.setupAudioAnalysis("local", stream);
 
       this.$nextTick(() => {
         const v = document.getElementById("vid-local");
@@ -336,15 +405,97 @@ function callApp() {
       });
     },
 
-    acquireTrack(kind) {
-      const isVideo = kind === "video";
-      const opts = isVideo
-        ? { video: this.videoId ? { deviceId: { exact: this.videoId } } : true }
-        : { audio: this.audioInputId ? { deviceId: { exact: this.audioInputId } } : true };
-      return navigator.mediaDevices.getUserMedia(opts).then((s) => {
-        s.getTracks().forEach((t) => { if (t.kind !== kind) t.stop(); });
-        return s.getTracks()[0] ?? null;
-      });
+    setupAudioAnalysis(id, stream) {
+      if (!stream.getAudioTracks().length) return;
+      try {
+        if (!audioCtx) {
+          const Ctx = window.AudioContext || window.webkitAudioContext;
+          if (!Ctx) return;
+          audioCtx = new Ctx();
+        }
+        if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+        const source = audioCtx.createMediaStreamSource(stream);
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 512;
+        source.connect(analyser);
+        analysers.set(id, {
+          analyser,
+          data: new Float32Array(analyser.fftSize),
+          level: 0,
+        });
+      } catch (err) {
+        console.warn("audio analysis setup failed", err);
+      }
+    },
+
+    stopAudioAnalysis(id) {
+      analysers.delete(id);
+      this.setSpeaking(id, false);
+    },
+
+    startSpeakingLoop() {
+      if (speakTimer) return;
+      speakTimer = setInterval(() => this.detectSpeaking(), 250);
+    },
+
+    stopSpeakingLoop() {
+      clearInterval(speakTimer);
+      speakTimer = null;
+      for (const id of [...analysers.keys()]) this.setSpeaking(id, false);
+    },
+
+    detectSpeaking() {
+      const THRESHOLD = 0.02;
+      let loudest = null;
+      let loudestLevel = 0;
+      for (const [id, entry] of analysers) {
+        entry.analyser.getFloatTimeDomainData(entry.data);
+        let sum = 0;
+        for (let i = 0; i < entry.data.length; i++) sum += entry.data[i] * entry.data[i];
+        const rms = Math.sqrt(sum / entry.data.length);
+        entry.level = Math.max(rms, entry.level * 0.6);
+        this.setSpeaking(id, entry.level > THRESHOLD);
+        if (id !== "local" && entry.level > loudestLevel) {
+          loudestLevel = entry.level;
+          loudest = id;
+        }
+      }
+      if (this.spotManual) return;
+      const speaker = loudestLevel > THRESHOLD ? loudest : null;
+      if (speaker && this.activeId !== speaker) {
+        this.activeId = speaker;
+        this.spotAuto = true;
+      } else if (!speaker && this.activeId && this.spotAuto) {
+        this.activeId = null;
+        this.spotAuto = false;
+      }
+    },
+
+    setSpeaking(id, speaking) {
+      if (id === "local") {
+        this.speaking = speaking;
+        return;
+      }
+      const p = this.peers.find((x) => x.id === id);
+      if (p) p.speaking = speaking;
+    },
+
+    async acquireTrack(kind) {
+      const devId = kind === "video" ? this.videoId : this.audioInputId;
+      const attempts = [];
+      if (devId) attempts.push({ [kind]: { deviceId: { exact: devId } } });
+      attempts.push({ [kind]: true });
+      for (const constraints of attempts) {
+        try {
+          const s = await navigator.mediaDevices.getUserMedia(constraints);
+          s.getTracks().forEach((t) => { if (t.kind !== kind) t.stop(); });
+          const track = s.getTracks().find((t) => t.kind === kind);
+          if (track) return track;
+        } catch (err) {
+          console.warn(kind + " недоступно", err);
+        }
+      }
+      throw new Error(kind + " недоступно");
     },
 
     async changeDevice(kind) {
@@ -354,7 +505,7 @@ function callApp() {
       }
 
       if (kind === "videoinput" && this.screenShare) {
-        this.status = "для смены камеры остановите демонстрацию экрана";
+        this.notify("для смены камеры остановите демонстрацию экрана");
         return;
       }
 
@@ -366,8 +517,8 @@ function callApp() {
         newTrack = await this.acquireTrack(trackKind);
       } catch (err) {
         console.warn(trackKind + " недоступно", err);
-        if (trackKind === "video") this.camOn = false;
-        if (trackKind === "audio") this.micOn = false;
+        if (trackKind === "video") { this.camOn = false; this.notify("камера недоступна"); }
+        if (trackKind === "audio") { this.micOn = false; this.notify("микрофон недоступен"); }
         return;
       }
       if (!newTrack) return;
@@ -407,16 +558,21 @@ function callApp() {
     share() {
       const link = this.getRoomLink();
       navigator.clipboard.writeText(link).then(() => {
-        const prev = this.status;
-        this.status = "ссылка скопирована!";
-        setTimeout(() => { this.status = prev; }, 2000);
+        this.notify("ссылка скопирована!", 2000);
       }).catch(() => {
-        this.status = "не удалось скопировать";
+        this.notify("не удалось скопировать");
       });
     },
 
     selectId(id) {
-      this.activeId = this.activeId === id ? null : id;
+      if (this.activeId === id) {
+        this.activeId = null;
+        this.spotManual = false;
+      } else {
+        this.activeId = id;
+        this.spotManual = true;
+        this.spotAuto = false;
+      }
     },
 
     fullscreen(id) {
@@ -435,17 +591,33 @@ function callApp() {
       }
     },
 
+    notify(text, ms = 4000) {
+      clearTimeout(notifyTimer);
+      this.status = text;
+      notifyTimer = setTimeout(() => {
+        if (this.status === text) {
+          this.status = this.connected ? "в созвоне: " + this.room : "не подключено";
+        }
+      }, ms);
+    },
+
     async join() {
       const room = (this.room || "").trim();
       if (!room) {
-        this.status = "введите ID комнаты";
+        this.notify("введите ID комнаты");
         return;
       }
+
+      const url = new URL(location.href);
+      url.searchParams.set("room", room);
+      history.replaceState(null, "", url);
+      this.room = room;
 
       this.status = "запрос камеры/микрофона...";
       this.myColor = colorFor(this.name || "me");
       this.initial = (this.name || "Я").slice(0, 1).toUpperCase();
       await this.startMedia();
+      this.startSpeakingLoop();
 
       this.reconnectAttempts = 0;
       await this.connect();
@@ -528,6 +700,7 @@ function callApp() {
         case "joined": {
           this.myId = msg.data.id;
           this.reconnectAttempts = 0;
+          document.title = "Sozvon — " + this.room;
           const peersList = msg.data.peers || [];
           const alive = new Set(peersList.map((p) => p.id));
           alive.add(this.myId);
@@ -536,6 +709,7 @@ function callApp() {
               pc.close();
               this.pcs.delete(id);
               this.pendingIce.delete(id);
+              this.stopAudioAnalysis(id);
             }
           }
           this.peers = this.peers.filter((p) => alive.has(p.id));
@@ -547,6 +721,7 @@ function callApp() {
               old.close();
               this.pcs.delete(p.id);
               this.pendingIce.delete(p.id);
+              this.stopAudioAnalysis(p.id);
             }
             this.addPeer(p.id, info);
             this.createPeer(p.id, true);
@@ -654,6 +829,16 @@ function callApp() {
       this.myId = null;
       this.connected = false;
       this.reconnectAttempts = 0;
+      this.stopSpeakingLoop();
+      analysers.clear();
+      if (audioCtx) {
+        audioCtx.close().catch(() => {});
+        audioCtx = null;
+      }
+      this.speaking = false;
+      this.spotAuto = false;
+      this.activeId = null;
+      document.title = "Sozvon";
     },
 
     leave() {
@@ -669,9 +854,11 @@ function callApp() {
     },
 
     async toggleMic() {
-      if (!this.localStream) return;
-      const track = this.localStream.getAudioTracks()[0];
-      if (!track) return;
+      const track = this.localStream?.getAudioTracks()[0];
+      if (!track) {
+        this.notify(this.connected ? "микрофон недоступен" : "сначала войдите в созвон");
+        return;
+      }
       track.enabled = !track.enabled;
       this.micOn = track.enabled;
       this.broadcastState();
@@ -682,9 +869,11 @@ function callApp() {
         await this.toggleScreen();
         return;
       }
-      if (!this.localStream) return;
-      const track = this.localStream.getVideoTracks()[0];
-      if (!track) return;
+      const track = this.localStream?.getVideoTracks()[0];
+      if (!track) {
+        this.notify(this.connected ? "камера недоступна" : "сначала войдите в созвон");
+        return;
+      }
       track.enabled = !track.enabled;
       this.camOn = track.enabled;
       this.broadcastState();
@@ -703,7 +892,14 @@ function callApp() {
         return;
       }
 
-      if (!navigator.mediaDevices?.getDisplayMedia) return;
+      if (!navigator.mediaDevices?.getDisplayMedia) {
+        this.notify("демонстрация экрана не поддерживается в этом браузере");
+        return;
+      }
+      if (!this.localStream) {
+        this.notify("сначала войдите в созвон");
+        return;
+      }
       try {
         const ss = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
         this.screenStream = ss;
@@ -762,6 +958,7 @@ function callApp() {
         this.broadcastState();
       } catch (err) {
         console.warn("screen share failed", err);
+        this.notify("не удалось начать демонстрацию экрана");
       }
     },
 
