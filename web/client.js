@@ -50,6 +50,7 @@ function callApp() {
   let audioCtx = null;
   let speakTimer = null;
   let notifyTimer = null;
+  let netTimer = null;
   const analysers = new Map();
 
   return {
@@ -70,6 +71,7 @@ function callApp() {
     pcs: new Map(),
     mutedPeers: new Set(),
     pendingIce: new Map(),
+    statsPrev: new Map(),
     reconnectAttempts: 0,
     reconnectTimer: null,
     codecPref: "auto",
@@ -217,6 +219,8 @@ function callApp() {
           mode: "",
           muted: this.mutedPeers.has(id),
           speaking: false,
+          rtt: null,
+          level: "",
         });
       }
     },
@@ -226,6 +230,9 @@ function callApp() {
       this.mutedPeers.delete(id);
       this.pendingIce.delete(id);
       this.stopAudioAnalysis(id);
+      for (const k of [...this.statsPrev.keys()]) {
+        if (k.startsWith(id + ":")) this.statsPrev.delete(k);
+      }
       const pc = this.pcs.get(id);
       if (pc) {
         pc.close();
@@ -254,8 +261,8 @@ function callApp() {
     },
 
     applyVideoCodecPrefs(pc) {
-      if (!pc.getTransceivers || !RTCRtpReceiver.getCapabilities) return;
-      const caps = RTCRtpReceiver.getCapabilities("video");
+      if (!pc.getTransceivers) return;
+      const caps = RTCRtpSender.getCapabilities?.("video") || RTCRtpReceiver.getCapabilities?.("video");
       if (!caps?.codecs?.length) return;
       const wanted = (this.codecPref || "").toLowerCase();
       let codecs = caps.codecs.slice();
@@ -299,7 +306,10 @@ function callApp() {
     },
 
     createPeer(peerId, initiator) {
-      const pc = new RTCPeerConnection({ iceServers: this.iceServers });
+      const pc = new RTCPeerConnection({
+        iceServers: this.iceServers,
+        bundlePolicy: "max-bundle",
+      });
       pc._polite = !initiator;
       pc._makingOffer = false;
       pc._ignoreOffer = false;
@@ -480,6 +490,75 @@ function callApp() {
       if (p) p.speaking = speaking;
     },
 
+    startNetMonitor() {
+      if (netTimer) return;
+      netTimer = setInterval(() => this.collectStats(), 2000);
+    },
+
+    stopNetMonitor() {
+      clearInterval(netTimer);
+      netTimer = null;
+      this.statsPrev.clear();
+      for (const p of this.peers) {
+        p.rtt = null;
+        p.level = "";
+      }
+    },
+
+    levelFor(rttMs, lossPct) {
+      if ((rttMs == null || rttMs < 150) && (lossPct == null || lossPct < 2)) return "good";
+      if ((rttMs == null || rttMs < 400) && (lossPct == null || lossPct < 8)) return "fair";
+      return "poor";
+    },
+
+    async collectStats() {
+      for (const [peerId, pc] of this.pcs) {
+        try {
+          const report = await pc.getStats();
+          let bestPair = null;
+          const inboundByKind = {};
+          report.forEach((r) => {
+            if (r.type === "candidate-pair" && r.state === "succeeded" && r.currentRoundTripTime != null) {
+              if (
+                !bestPair ||
+                (r.selected === true && bestPair.selected !== true) ||
+                (r.selected === bestPair.selected &&
+                  (r.lastPacketReceivedTimestamp || 0) > (bestPair.lastPacketReceivedTimestamp || 0))
+              ) {
+                bestPair = r;
+              }
+            }
+            if (r.type === "inbound-rtp" && !r.isRemote) {
+              inboundByKind[r.kind] = r;
+            }
+          });
+
+          let rttMs = null;
+          if (bestPair) rttMs = bestPair.currentRoundTripTime * 1000;
+
+          let lossPct = null;
+          const inbound = inboundByKind.video || inboundByKind.audio;
+          if (inbound) {
+            const key = peerId + ":" + inbound.kind;
+            const prev = this.statsPrev.get(key);
+            const received = inbound.packetsReceived || 0;
+            const lost = Math.max(inbound.packetsLost || 0, 0);
+            if (prev) {
+              const dRecv = received - prev.received;
+              const dLost = Math.max(lost - prev.lost, 0);
+              const total = dRecv + dLost;
+              if (total > 0) lossPct = (dLost / total) * 100;
+            }
+            this.statsPrev.set(key, { received, lost });
+          }
+
+          this.updatePeer(peerId, { rtt: rttMs, level: this.levelFor(rttMs, lossPct) });
+        } catch (err) {
+          console.warn("stats collection failed", err);
+        }
+      }
+    },
+
     async acquireTrack(kind) {
       const devId = kind === "video" ? this.videoId : this.audioInputId;
       const attempts = [];
@@ -618,6 +697,7 @@ function callApp() {
       this.initial = (this.name || "Я").slice(0, 1).toUpperCase();
       await this.startMedia();
       this.startSpeakingLoop();
+      this.startNetMonitor();
 
       this.reconnectAttempts = 0;
       await this.connect();
@@ -830,6 +910,7 @@ function callApp() {
       this.connected = false;
       this.reconnectAttempts = 0;
       this.stopSpeakingLoop();
+      this.stopNetMonitor();
       analysers.clear();
       if (audioCtx) {
         audioCtx.close().catch(() => {});
@@ -881,14 +962,7 @@ function callApp() {
 
     async toggleScreen() {
       if (this.screenShare) {
-        this.screenStream?.getTracks().forEach((t) => t.stop());
-        this.screenStream = null;
-        this.screenShare = false;
-        this.camOn = this._camWasOn ?? false;
-        this.applyVideoBitrate(2000000);
-        await this.replaceVideoTrack();
-        await this.replaceAudioTrack();
-        this.broadcastState();
+        await this.stopScreenShare();
         return;
       }
 
@@ -945,21 +1019,30 @@ function callApp() {
           if (v) v.srcObject = this.localStream;
         });
 
-        screenTrack.onended = async () => {
-          this.screenStream = null;
-          this.screenShare = false;
-          this.camOn = this._camWasOn;
-          this.applyVideoBitrate(2000000);
-          await this.replaceVideoTrack();
-          await this.replaceAudioTrack();
-          this.broadcastState();
-        };
+        screenTrack.onended = () => this.stopScreenShare();
 
         this.broadcastState();
       } catch (err) {
         console.warn("screen share failed", err);
         this.notify("не удалось начать демонстрацию экрана");
       }
+    },
+
+    async stopScreenShare() {
+      if (!this.screenShare) return;
+      this.screenShare = false;
+      const ss = this.screenStream;
+      this.screenStream = null;
+      this.camOn = this._camWasOn ?? false;
+      this._camWasOn = false;
+      ss?.getTracks().forEach((t) => {
+        t.onended = null;
+        t.stop();
+      });
+      this.applyVideoBitrate(2000000);
+      await this.replaceVideoTrack();
+      await this.replaceAudioTrack();
+      this.broadcastState();
     },
 
     async replaceVideoTrack() {

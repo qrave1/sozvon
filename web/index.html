@@ -102,6 +102,10 @@
       padding: 2px 8px;
       border-radius: 4px;
     }
+    .tile .badge.net { top: 30px; }
+    .tile .badge.net.net-good { color: #2ecc71; }
+    .tile .badge.net.net-fair { color: #f1c40f; }
+    .tile .badge.net.net-poor { color: #e74c3c; }
     .tile .peer-mute {
       position: absolute;
       top: 6px; left: 8px;
@@ -244,6 +248,7 @@
           <span class="mic-off" x-show="!p.micOn" title="микрофон выключен">🔇</span>
         </div>
         <div class="badge" x-show="p.mode" x-text="p.mode"></div>
+        <div class="badge net" :class="'net-' + (p.level || 'good')" x-show="p.rtt !== null && p.rtt !== undefined" x-text="Math.round(p.rtt) + ' ms'"></div>
       </div>
     </template>
   </div>
