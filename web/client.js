@@ -14,6 +14,7 @@ function callApp() {
   const RECONNECT_BASE_DELAY_MS = 1000;
   const RECONNECT_MAX_DELAY_MS = 15000;
   const PREFS_KEY = "sozvon.prefs";
+  const SPOTLIGHT_ENABLED = false;
 
   function loadPrefs() {
     try {
@@ -470,7 +471,7 @@ function callApp() {
           loudest = id;
         }
       }
-      if (this.spotManual) return;
+      if (!SPOTLIGHT_ENABLED || this.spotManual) return;
       const speaker = loudestLevel > THRESHOLD ? loudest : null;
       if (speaker && this.activeId !== speaker) {
         this.activeId = speaker;
@@ -644,6 +645,7 @@ function callApp() {
     },
 
     selectId(id) {
+      if (!SPOTLIGHT_ENABLED) return;
       if (this.activeId === id) {
         this.activeId = null;
         this.spotManual = false;
