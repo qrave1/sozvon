@@ -41,6 +41,10 @@ function callApp() {
     return COLORS[h % COLORS.length];
   }
 
+  function isValidColor(c) {
+    return typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c);
+  }
+
   function setVideoBitrate(sender, bitrate) {
     const params = sender.getParameters();
     if (!params.encodings) params.encodings = [{}];
@@ -63,6 +67,23 @@ function callApp() {
     camOn: false,
     localStream: null,
     myColor: "#3498db",
+    prefColor: "",
+    colors: [
+      "#e74c3c", "#3498db", "#2ecc71", "#9b59b6", "#f1c40f",
+      "#1abc9c", "#e67e22", "#34495e", "#fd79a8", "#00cec9",
+    ],
+    colorNames: {
+      "#e74c3c": "Красный",
+      "#3498db": "Синий",
+      "#2ecc71": "Зелёный",
+      "#9b59b6": "Фиолетовый",
+      "#f1c40f": "Жёлтый",
+      "#1abc9c": "Бирюзовый",
+      "#e67e22": "Оранжевый",
+      "#34495e": "Тёмно-серый",
+      "#fd79a8": "Розовый",
+      "#00cec9": "Аква",
+    },
     initial: "Я",
     peers: [],
 
@@ -103,11 +124,14 @@ function callApp() {
       if (prefs.audioInputId) this.audioInputId = prefs.audioInputId;
       if (prefs.audioOutputId) this.audioOutputId = prefs.audioOutputId;
       if (prefs.videoId) this.videoId = prefs.videoId;
+      if (isValidColor(prefs.prefColor)) this.prefColor = prefs.prefColor;
       this.room = getRoomFromUrl() || prefs.room || "";
 
-      ["name", "room", "codecPref", "audioInputId", "audioOutputId", "videoId"].forEach((k) =>
+      ["name", "room", "codecPref", "audioInputId", "audioOutputId", "videoId", "prefColor"].forEach((k) =>
         this.$watch(k, () => this.persist())
       );
+      this.$watch("prefColor", () => this.updateColor());
+      this.updateColor();
 
       window.addEventListener("beforeunload", () => this.leave());
       window.addEventListener("keydown", (e) => this.onKeydown(e));
@@ -120,6 +144,10 @@ function callApp() {
       });
     },
 
+    updateColor() {
+      this.myColor = this.prefColor || colorFor(this.name || "me");
+    },
+
     persist() {
       savePrefs({
         name: this.name,
@@ -128,6 +156,7 @@ function callApp() {
         audioInputId: this.audioInputId,
         audioOutputId: this.audioOutputId,
         videoId: this.videoId,
+        prefColor: this.prefColor,
       });
     },
 
@@ -439,7 +468,7 @@ function callApp() {
       stream.getVideoTracks().forEach((t) => (t.enabled = this.camOn));
       stream.getAudioTracks().forEach((t) => (t.enabled = this.micOn));
 
-      this.myColor = colorFor(this.name || "me");
+      this.myColor = this.prefColor || colorFor(this.name || "me");
       this.initial = (this.name || "Я").slice(0, 1).toUpperCase();
       this.setupAudioAnalysis("local", stream);
 
@@ -753,7 +782,7 @@ function callApp() {
       this.connecting = true;
 
       this.status = "запрос камеры/микрофона...";
-      this.myColor = colorFor(this.name || "me");
+      this.updateColor();
       this.initial = (this.name || "Я").slice(0, 1).toUpperCase();
 
       try {

@@ -225,6 +225,14 @@
         </template>
       </select>
     </label>
+    <label>🎨 Цвет
+      <select x-model="prefColor" aria-label="Выбор цвета аватара">
+        <option value="">Авто</option>
+        <template x-for="c in colors" :key="c">
+          <option :value="c" x-text="colorNames[c] || c" :style="'color:' + c"></option>
+        </template>
+      </select>
+    </label>
     <label>🎞 Кодек
       <select x-model="codecPref" @change="changeCodec()">
         <option value="auto">Авто</option>
