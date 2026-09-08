@@ -27,6 +27,7 @@ type Client struct {
 	Name  string
 	CamOn bool
 	MicOn bool
+	Color string
 
 	Send chan Message
 
@@ -292,13 +293,14 @@ type PeerInfo struct {
 	Name  string `json:"name"`
 	CamOn bool   `json:"camOn"`
 	MicOn bool   `json:"micOn"`
+	Color string `json:"color,omitempty"`
 	Info  string `json:"info,omitempty"`
 }
 
 func (c *Client) peerInfo() PeerInfo {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return PeerInfo{ID: c.ID, Name: c.Name, CamOn: c.CamOn, MicOn: c.MicOn}
+	return PeerInfo{ID: c.ID, Name: c.Name, CamOn: c.CamOn, MicOn: c.MicOn, Color: c.Color}
 }
 
 func (s *Server) handleJoin(c *Client, msg Message) {
@@ -313,6 +315,7 @@ func (s *Server) handleJoin(c *Client, msg Message) {
 		Name  string `json:"name"`
 		CamOn bool   `json:"camOn"`
 		MicOn bool   `json:"micOn"`
+		Color string `json:"color"`
 	}
 	if len(msg.Data) > 0 {
 		_ = json.Unmarshal(msg.Data, &info)
@@ -322,6 +325,7 @@ func (s *Server) handleJoin(c *Client, msg Message) {
 	c.Name = info.Name
 	c.CamOn = info.CamOn
 	c.MicOn = info.MicOn
+	c.Color = info.Color
 	c.mu.Unlock()
 
 	room := s.GetRoom(msg.Room)
@@ -357,6 +361,7 @@ func (s *Server) handleState(c *Client, msg Message) {
 		Name  string `json:"name"`
 		CamOn bool   `json:"camOn"`
 		MicOn bool   `json:"micOn"`
+		Color string `json:"color"`
 	}
 	if len(msg.Data) > 0 {
 		_ = json.Unmarshal(msg.Data, &info)
@@ -366,6 +371,7 @@ func (s *Server) handleState(c *Client, msg Message) {
 	c.Name = info.Name
 	c.CamOn = info.CamOn
 	c.MicOn = info.MicOn
+	c.Color = info.Color
 	c.mu.Unlock()
 
 	if c.Room == nil {

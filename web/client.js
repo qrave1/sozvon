@@ -129,7 +129,10 @@ function callApp() {
       ["name", "room", "codecPref", "audioInputId", "audioOutputId", "videoId", "prefColor"].forEach((k) =>
         this.$watch(k, () => this.persist())
       );
-      this.$watch("prefColor", () => this.updateColor());
+      this.$watch("prefColor", () => {
+        if (!this.camOn) this.updateColor();
+        if (this.connected) this.broadcastState();
+      });
       this.updateColor();
 
       window.addEventListener("beforeunload", () => this.leave());
@@ -265,7 +268,7 @@ function callApp() {
           name: info?.name || "",
           camOn: info?.camOn ?? true,
           micOn: info?.micOn ?? true,
-          color: colorFor(id),
+          color: isValidColor(info?.color) ? info.color : colorFor(id),
           initial: (info?.name || id).slice(0, 1).toUpperCase(),
           mode: "",
           muted: this.mutedPeers.has(id),
@@ -299,6 +302,7 @@ function callApp() {
     updatePeer(id, patch) {
       const p = this.peers.find((x) => x.id === id);
       if (!p) return;
+      if (patch.color !== undefined && !isValidColor(patch.color)) delete patch.color;
       Object.assign(p, patch);
       if (patch.name) p.initial = patch.name.slice(0, 1).toUpperCase();
     },
@@ -866,7 +870,7 @@ function callApp() {
           this.send({
             type: "join",
             room: this.room,
-            data: { name: this.name, camOn: this.camOn, micOn: this.micOn, screenShare: this.screenShare },
+            data: { name: this.name, camOn: this.camOn, micOn: this.micOn, screenShare: this.screenShare, color: this.myColor },
           });
           resolveOnce();
         };
@@ -1120,7 +1124,7 @@ function callApp() {
     broadcastState() {
       this.send({
         type: "state",
-        data: { name: this.name, camOn: this.camOn, micOn: this.micOn, screenShare: this.screenShare },
+        data: { name: this.name, camOn: this.camOn, micOn: this.micOn, screenShare: this.screenShare, color: this.myColor },
       });
     },
 
@@ -1147,6 +1151,7 @@ function callApp() {
       }
       track.enabled = !track.enabled;
       this.camOn = track.enabled;
+      if (!this.camOn) this.updateColor();
       this.broadcastState();
     },
 
@@ -1239,6 +1244,7 @@ function callApp() {
       this.screenStream = null;
       this.camOn = this._camWasOn ?? false;
       this._camWasOn = false;
+      if (!this.camOn) this.updateColor();
       ss?.getTracks().forEach((t) => {
         t.onended = null;
         t.stop();
