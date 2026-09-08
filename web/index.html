@@ -6,6 +6,7 @@
   <title>Sozvon</title>
   <style>
     * { box-sizing: border-box; }
+    [x-cloak] { display: none !important; }
     body {
       margin: 0;
       font-family: system-ui, -apple-system, sans-serif;
@@ -14,6 +15,7 @@
       display: flex;
       flex-direction: column;
       height: 100vh;
+      height: 100dvh;
       overflow: hidden;
     }
     header {
@@ -47,12 +49,12 @@
     #videos {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      grid-auto-rows: 1fr;
+      grid-auto-rows: minmax(180px, 1fr);
       gap: 10px;
       padding: 16px;
       flex: 1;
       min-height: 0;
-      overflow: hidden;
+      overflow: auto;
     }
     #videos.spotlight {
       grid-template-columns: 1fr 200px;
@@ -174,23 +176,32 @@
       max-width: 180px;
     }
     .device-bar select:disabled { opacity: .4; cursor: default; }
+    @media (max-width: 600px) {
+      header { padding: 8px; }
+      #videos {
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        padding: 8px;
+        gap: 8px;
+      }
+    }
   </style>
 </head>
 <body x-data="callApp()" x-init="init()">
   <header>
     <input x-model="name" placeholder="Ваше имя" aria-label="Ваше имя" :disabled="connected" />
     <input x-model="room" placeholder="ID комнаты" aria-label="ID комнаты" :disabled="connected" />
-    <button x-show="!connected" @click="join()">➡ Войти</button>
-    <button class="danger" x-show="connected" @click="leave()">⬅ Выйти</button>
+    <button x-cloak x-show="!connected" :disabled="connecting" @click="join()"
+            x-text="connecting ? '⏳ Подключение…' : '➡ Войти'"></button>
+    <button class="danger" x-cloak x-show="connected" @click="leave()">⬅ Выйти</button>
     <button :class="micOn ? '' : 'off'" @click="toggleMic()" x-text="micOn ? '🎤 Микрофон' : '🔇 Микрофон'" :aria-pressed="!micOn" aria-label="Переключить микрофон"></button>
     <button :class="camOn ? '' : 'off'" @click="toggleCam()" x-text="camOn ? '📹 Камера' : '🚫 Камера'" :aria-pressed="!camOn" aria-label="Переключить камеру"></button>
-    <button :class="screenShare ? '' : 'off'" x-show="connected" @click="toggleScreen()" x-text="screenShare ? '🖥 Экран: вкл' : '🖥 Экран'" :aria-pressed="screenShare" aria-label="Переключить демонстрацию экрана"></button>
-    <button x-show="connected" @click="share()" aria-label="Скопировать ссылку на комнату">🔗 Поделиться</button>
+    <button x-cloak :class="screenShare ? '' : 'off'" x-show="connected" @click="toggleScreen()" x-text="screenShare ? '🖥 Экран: вкл' : '🖥 Экран'" :aria-pressed="screenShare" aria-label="Переключить демонстрацию экрана"></button>
+    <button x-cloak x-show="connected" @click="share()" aria-label="Скопировать ссылку на комнату">🔗 Поделиться</button>
     <button @click="showSettings = !showSettings" :class="showSettings ? '' : 'off'" :aria-pressed="showSettings" title="Настройки устройств" aria-label="Настройки устройств">⚙️</button>
     <span id="status" x-text="status" role="status" aria-live="polite"></span>
   </header>
 
-  <div class="device-bar" x-show="showSettings" x-transition:enter.duration.200ms x-transition:leave.duration.150ms>
+  <div class="device-bar" x-cloak x-show="showSettings" x-transition:enter.duration.200ms x-transition:leave.duration.150ms>
     <label>🎤
       <select x-model="audioInputId" @change="changeDevice('audioinput')">
         <template x-for="d in devices.audioinput" :key="d.deviceId">
@@ -199,7 +210,9 @@
       </select>
     </label>
     <label>🔊
-      <select x-model="audioOutputId" @change="changeDevice('audiooutput')">
+      <select x-model="audioOutputId" @change="changeDevice('audiooutput')"
+              :disabled="!audioOutputSupported || !devices.audiooutput.length"
+              title="Выбор аудиовыхода поддерживается не во всех браузерах">
         <template x-for="d in devices.audiooutput" :key="d.deviceId">
           <option :value="d.deviceId" x-text="d.label || d.deviceId.slice(0,12) + '…'"></option>
         </template>
@@ -224,7 +237,7 @@
   </div>
 
   <div id="videos" :class="activeId ? 'spotlight' : ''">
-      <div class="tile" id="tile-local" :class="[activeId === 'local' ? 'active-lg' : '', speaking ? 'speaking' : '']" @click="selectId('local')" x-show="connected">
+      <div class="tile" id="tile-local" x-cloak :class="[activeId === 'local' ? 'active-lg' : '', speaking ? 'speaking' : '']" @click="selectId('local')" x-show="connected">
       <video id="vid-local" autoplay playsinline muted x-show="camOn"></video>
       <div class="avatar" x-show="!camOn" :style="'background:' + myColor" x-text="initial"></div>
       <button class="peer-fullscreen" x-show="camOn" @click.stop="fullscreen('local')" title="Во весь экран" aria-label="Своё видео во весь экран">⛶</button>

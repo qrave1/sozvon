@@ -68,10 +68,13 @@ function callApp() {
 
     ws: null,
     myId: null,
+    connecting: false,
+    connectionToken: 0,
     iceServers: ICE_SERVERS,
     pcs: new Map(),
     mutedPeers: new Set(),
     pendingIce: new Map(),
+    pendingConnectReject: null,
     statsPrev: new Map(),
     reconnectAttempts: 0,
     reconnectTimer: null,
@@ -83,10 +86,15 @@ function callApp() {
     activeId: null,
     showSettings: false,
     screenShare: false,
+    screenStream: null,
+    _screenAudioTrack: null,
+    _savedMicTrack: null,
+    _camWasOn: false,
     speaking: false,
     spotManual: false,
     spotAuto: false,
     devices: { audioinput: [], audiooutput: [], videoinput: [] },
+    audioOutputSupported: false,
 
     async init() {
       const prefs = loadPrefs();
@@ -95,7 +103,7 @@ function callApp() {
       if (prefs.audioInputId) this.audioInputId = prefs.audioInputId;
       if (prefs.audioOutputId) this.audioOutputId = prefs.audioOutputId;
       if (prefs.videoId) this.videoId = prefs.videoId;
-      if (!getRoomFromUrl() && prefs.room) this.room = prefs.room;
+      this.room = getRoomFromUrl() || prefs.room || "";
 
       ["name", "room", "codecPref", "audioInputId", "audioOutputId", "videoId"].forEach((k) =>
         this.$watch(k, () => this.persist())
@@ -103,9 +111,12 @@ function callApp() {
 
       window.addEventListener("beforeunload", () => this.leave());
       window.addEventListener("keydown", (e) => this.onKeydown(e));
+      this.audioOutputSupported =
+        typeof HTMLVideoElement !== "undefined" &&
+        typeof HTMLVideoElement.prototype.setSinkId === "function";
       await this.enumerateDevices();
       navigator.mediaDevices?.addEventListener("devicechange", () => {
-        this.enumerateDevices();
+        this.enumerateDevices({ resetInvalid: true });
       });
     },
 
@@ -129,17 +140,26 @@ function callApp() {
       else if (k === "v" || k === "м") this.toggleCam();
     },
 
-    async enumerateDevices() {
+    async enumerateDevices({ resetInvalid = false } = {}) {
       if (!navigator.mediaDevices?.enumerateDevices) return;
-      const all = await navigator.mediaDevices.enumerateDevices();
-      const grouped = { audioinput: [], audiooutput: [], videoinput: [] };
-      for (const d of all) {
-        if (d.kind in grouped) grouped[d.kind].push(d);
+      try {
+        const all = await navigator.mediaDevices.enumerateDevices();
+        const grouped = { audioinput: [], audiooutput: [], videoinput: [] };
+        for (const d of all) {
+          if (d.kind in grouped) grouped[d.kind].push(d);
+        }
+        this.devices = grouped;
+
+        const selectDevice = (current, list) => {
+          const exists = list.some((d) => d.deviceId === current);
+          return exists || (!resetInvalid && current) ? current : (list[0]?.deviceId || "");
+        };
+        this.audioInputId = selectDevice(this.audioInputId, grouped.audioinput);
+        this.audioOutputId = selectDevice(this.audioOutputId, grouped.audiooutput);
+        this.videoId = selectDevice(this.videoId, grouped.videoinput);
+      } catch (err) {
+        console.warn("не удалось получить список устройств", err);
       }
-      this.devices = grouped;
-      if (!this.audioInputId && grouped.audioinput.length) this.audioInputId = grouped.audioinput[0].deviceId;
-      if (!this.audioOutputId && grouped.audiooutput.length) this.audioOutputId = grouped.audiooutput[0].deviceId;
-      if (!this.videoId && grouped.videoinput.length) this.videoId = grouped.videoinput[0].deviceId;
     },
 
     async loadIceServers() {
@@ -166,6 +186,7 @@ function callApp() {
         if (video && stream) {
           video.srcObject = stream;
           if (this.mutedPeers.has(id)) this.setRemoteMuted(id, true);
+          this.applyAudioOutput();
         }
       });
     },
@@ -175,17 +196,18 @@ function callApp() {
       this.pendingIce.get(id).push(candidate);
     },
 
-    flushIceQueue(id) {
+    async flushIceQueue(id) {
       const queue = this.pendingIce.get(id);
       if (!queue) return;
       this.pendingIce.delete(id);
       const pc = this.pcs.get(id);
       if (!pc) return;
-      for (const c of queue) {
-        try {
-          pc.addIceCandidate(new RTCIceCandidate(c));
-        } catch (err) {
-          console.error("addIceCandidate failed", err);
+      const results = await Promise.allSettled(
+        queue.map((c) => pc.addIceCandidate(new RTCIceCandidate(c)))
+      );
+      for (const result of results) {
+        if (result.status === "rejected") {
+          console.error("addIceCandidate failed", result.reason);
         }
       }
     },
@@ -306,6 +328,24 @@ function callApp() {
       }
     },
 
+    async replaceOrAddTrack(pc, kind, track) {
+      if (!pc || pc.connectionState === "closed") return;
+
+      let sender = pc.getSenders().find((s) => s.track?.kind === kind);
+      if (!sender && pc.getTransceivers) {
+        const transceiver = pc.getTransceivers().find((tr) =>
+          tr.sender?.track?.kind === kind || tr.receiver?.track?.kind === kind
+        );
+        sender = transceiver?.sender || null;
+      }
+
+      if (sender) {
+        await sender.replaceTrack(track);
+      } else if (track && this.localStream) {
+        pc.addTrack(track, this.localStream);
+      }
+    },
+
     createPeer(peerId, initiator) {
       const pc = new RTCPeerConnection({
         iceServers: this.iceServers,
@@ -395,6 +435,7 @@ function callApp() {
       }
 
       this.localStream = stream;
+      await this.enumerateDevices({ resetInvalid: true });
       stream.getVideoTracks().forEach((t) => (t.enabled = this.camOn));
       stream.getAudioTracks().forEach((t) => (t.enabled = this.micOn));
 
@@ -612,13 +653,8 @@ function callApp() {
       this.localStream.addTrack(newTrack);
 
       for (const pc of this.pcs.values()) {
-        const sender = pc.getSenders().find((s) => s.track?.kind === trackKind);
         try {
-          if (sender) {
-            await sender.replaceTrack(newTrack);
-          } else {
-            pc.addTrack(newTrack, this.localStream);
-          }
+          await this.replaceOrAddTrack(pc, trackKind, newTrack);
         } catch (err) {
           console.error("replaceTrack failed", err);
         }
@@ -637,11 +673,28 @@ function callApp() {
 
     share() {
       const link = this.getRoomLink();
-      navigator.clipboard.writeText(link).then(() => {
-        this.notify("ссылка скопирована!", 2000);
-      }).catch(() => {
-        this.notify("не удалось скопировать");
-      });
+      (async () => {
+        try {
+          if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(link);
+          } else {
+            const input = document.createElement("textarea");
+            input.value = link;
+            input.setAttribute("readonly", "");
+            input.style.position = "fixed";
+            input.style.opacity = "0";
+            document.body.appendChild(input);
+            input.select();
+            const copied = document.execCommand("copy");
+            input.remove();
+            if (!copied) throw new Error("copy command failed");
+          }
+          this.notify("ссылка скопирована!", 2000);
+        } catch (err) {
+          console.warn("не удалось скопировать ссылку", err);
+          this.notify("не удалось скопировать ссылку");
+        }
+      })();
     },
 
     selectId(id) {
@@ -683,6 +736,8 @@ function callApp() {
     },
 
     async join() {
+      if (this.connected || this.connecting) return;
+
       const room = (this.room || "").trim();
       if (!room) {
         this.notify("введите ID комнаты");
@@ -693,38 +748,110 @@ function callApp() {
       url.searchParams.set("room", room);
       history.replaceState(null, "", url);
       this.room = room;
+      this.connectionToken += 1;
+      const token = this.connectionToken;
+      this.connecting = true;
 
       this.status = "запрос камеры/микрофона...";
       this.myColor = colorFor(this.name || "me");
       this.initial = (this.name || "Я").slice(0, 1).toUpperCase();
-      await this.startMedia();
-      this.startSpeakingLoop();
-      this.startNetMonitor();
 
-      this.reconnectAttempts = 0;
-      await this.connect();
+      try {
+        await this.startMedia();
+        this.startSpeakingLoop();
+        this.startNetMonitor();
+
+        this.reconnectAttempts = 0;
+        await this.connect(token);
+      } catch (err) {
+        console.error("join failed", err);
+        if (token === this.connectionToken) {
+          this.teardown();
+          this.status = "не удалось подключиться";
+        }
+      } finally {
+        if (token === this.connectionToken) this.connecting = false;
+      }
     },
 
-    async connect() {
+    async connect(token = this.connectionToken) {
       await this.loadIceServers();
+      if (token !== this.connectionToken || !this.room) {
+        throw new Error("connection cancelled");
+      }
 
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      const ws = new WebSocket(`${proto}://${location.host}/ws`);
+      return new Promise((resolve, reject) => {
+        let ws = null;
+        let settled = false;
+        let timeout = null;
 
-      ws.onopen = () => {
-        this.connected = true;
-        this.status = "в созвоне: " + this.room;
-        this.send({
-          type: "join",
-          room: this.room,
-          data: { name: this.name, camOn: this.camOn, micOn: this.micOn, screenShare: this.screenShare },
-        });
-      };
+        const clearPending = () => {
+          if (this.pendingConnectReject === reject) this.pendingConnectReject = null;
+        };
+        const resolveOnce = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          clearPending();
+          resolve();
+        };
+        const rejectOnce = (err) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          clearPending();
+          reject(err);
+        };
 
-      ws.onclose = () => this.handleClose();
-      ws.onmessage = (ev) => this.handleWsMessage(ev);
+        try {
+          ws = new WebSocket(`${proto}://${location.host}/ws`);
+        } catch (err) {
+          rejectOnce(err);
+          return;
+        }
 
-      this.ws = ws;
+        this.pendingConnectReject = reject;
+        this.ws = ws;
+        timeout = setTimeout(() => {
+          rejectOnce(new Error("WebSocket connection timeout"));
+          if (this.ws === ws) this.ws = null;
+          ws.onopen = null;
+          ws.onmessage = null;
+          ws.onerror = null;
+          ws.onclose = null;
+          try { ws.close(); } catch (_) {}
+        }, 10000);
+
+        ws.onopen = () => {
+          if (token !== this.connectionToken || this.ws !== ws) {
+            rejectOnce(new Error("stale WebSocket connection"));
+            ws.close();
+            return;
+          }
+          this.connected = true;
+          this.connecting = false;
+          this.status = "в созвоне: " + this.room;
+          this.send({
+            type: "join",
+            room: this.room,
+            data: { name: this.name, camOn: this.camOn, micOn: this.micOn, screenShare: this.screenShare },
+          });
+          resolveOnce();
+        };
+
+        ws.onerror = () => {
+          console.warn("WebSocket error");
+        };
+        ws.onclose = () => {
+          const isCurrent = this.ws === ws;
+          if (!settled) rejectOnce(new Error("WebSocket connection closed"));
+          if (!isCurrent) return;
+          this.ws = null;
+          this.handleClose();
+        };
+        ws.onmessage = (ev) => this.handleWsMessage(ev);
+      });
     },
 
     handleWsMessage(ev) {
@@ -741,9 +868,11 @@ function callApp() {
     handleClose() {
       this.connected = false;
       if (!this.room || !this.myId) {
+        this.connecting = false;
         this.status = "соединение закрыто";
         return;
       }
+      this.connecting = true;
       this.scheduleReconnect();
     },
 
@@ -756,12 +885,19 @@ function callApp() {
         return;
       }
       this.reconnectAttempts = attempt;
+      this.connecting = true;
       const delay = Math.min(RECONNECT_BASE_DELAY_MS * 2 ** (attempt - 1), RECONNECT_MAX_DELAY_MS);
       this.status = `соединение потеряно, переподключение (${attempt}/${MAX_RECONNECT_ATTEMPTS})...`;
       this.reconnectTimer = setTimeout(() => {
         this.reconnectTimer = null;
-        if (!this.room) return;
-        this.connect();
+        if (!this.room || !this.myId) {
+          this.connecting = false;
+          return;
+        }
+        this.connect(this.connectionToken).catch((err) => {
+          console.warn("reconnect failed", err);
+          if (this.room && this.myId && !this.reconnectTimer) this.scheduleReconnect();
+        });
       }, delay);
     },
 
@@ -849,7 +985,7 @@ function callApp() {
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
             this.send({ type: "answer", to: peerId, data: answer });
-            this.flushIceQueue(peerId);
+            await this.flushIceQueue(peerId);
           } catch (err) {
             console.error("answer failed", err);
           }
@@ -865,7 +1001,7 @@ function callApp() {
             } catch (err) {
               console.error("setRemoteDescription(answer) failed", err);
             }
-            this.flushIceQueue(peerId);
+            await this.flushIceQueue(peerId);
           }
           break;
         }
@@ -889,10 +1025,31 @@ function callApp() {
     },
 
     teardown() {
+      this.connectionToken += 1;
+      this.connecting = false;
       if (this.reconnectTimer) {
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = null;
       }
+      if (this.pendingConnectReject) {
+        const reject = this.pendingConnectReject;
+        this.pendingConnectReject = null;
+        reject(new Error("connection cancelled"));
+      }
+      const screenStream = this.screenStream;
+      const savedMic = this._savedMicTrack;
+      const screenAudio = this._screenAudioTrack;
+      this.screenStream = null;
+      this.screenShare = false;
+      this._screenAudioTrack = null;
+      this._savedMicTrack = null;
+      this._camWasOn = false;
+      screenStream?.getTracks().forEach((t) => {
+        t.onended = null;
+        t.stop();
+      });
+      if (screenAudio && !screenStream?.getTracks().includes(screenAudio)) screenAudio.stop();
+      if (savedMic && !this.localStream?.getTracks().includes(savedMic)) savedMic.stop();
       if (this.ws) {
         const ws = this.ws;
         this.ws = null;
@@ -976,40 +1133,48 @@ function callApp() {
         this.notify("сначала войдите в созвон");
         return;
       }
+      let ss = null;
       try {
-        const ss = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+        ss = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+        const screenTrack = ss.getVideoTracks()[0];
+        if (!screenTrack) throw new Error("screen video track is unavailable");
+
+        const oldVideo = this.localStream.getVideoTracks()[0] ?? null;
+        const screenAudio = ss.getAudioTracks()[0] ?? null;
+        const oldAudio = screenAudio ? (this.localStream.getAudioTracks()[0] ?? null) : null;
+
         this.screenStream = ss;
         this.screenShare = true;
         this._camWasOn = this.camOn;
         this.camOn = true;
+        this._screenAudioTrack = screenAudio;
+        this._savedMicTrack = oldAudio;
+        screenTrack.onended = () => this.stopScreenShare();
 
-        const screenTrack = ss.getVideoTracks()[0];
-        const oldVideo = this.localStream.getVideoTracks()[0];
-        if (oldVideo) this.localStream.removeTrack(oldVideo);
+        if (oldVideo) {
+          this.localStream.removeTrack(oldVideo);
+          oldVideo.stop();
+        }
         this.localStream.addTrack(screenTrack);
         screenTrack.contentHint = "detail";
         this.applyVideoBitrate(4000000);
 
-        const screenAudio = ss.getAudioTracks()[0];
         if (screenAudio) {
-          this._savedMicTrack = this.localStream.getAudioTracks()[0] ?? null;
-          const oldAudio = this.localStream.getAudioTracks()[0];
           if (oldAudio) this.localStream.removeTrack(oldAudio);
+          screenAudio.enabled = this.micOn;
           this.localStream.addTrack(screenAudio);
         }
 
         for (const pc of this.pcs.values()) {
           try {
-            const sender = pc.getSenders().find((s) => s.track?.kind === "video");
-            if (sender) await sender.replaceTrack(screenTrack);
+            await this.replaceOrAddTrack(pc, "video", screenTrack);
           } catch (err) {
             console.error("screen replaceTrack(video) failed", err);
           }
 
           if (screenAudio) {
             try {
-              const audioSender = pc.getSenders().find((s) => s.track?.kind === "audio");
-              if (audioSender) await audioSender.replaceTrack(screenAudio);
+              await this.replaceOrAddTrack(pc, "audio", screenAudio);
             } catch (err) {
               console.error("screen replaceTrack(audio) failed", err);
             }
@@ -1021,11 +1186,17 @@ function callApp() {
           if (v) v.srcObject = this.localStream;
         });
 
-        screenTrack.onended = () => this.stopScreenShare();
-
         this.broadcastState();
       } catch (err) {
         console.warn("screen share failed", err);
+        if (this.screenShare) {
+          await this.stopScreenShare();
+        } else {
+          ss?.getTracks().forEach((t) => {
+            t.onended = null;
+            t.stop();
+          });
+        }
         this.notify("не удалось начать демонстрацию экрана");
       }
     },
@@ -1048,20 +1219,24 @@ function callApp() {
     },
 
     async replaceVideoTrack() {
+      if (!this.localStream) return;
+      const oldVideo = this.localStream.getVideoTracks()[0] ?? null;
+      if (oldVideo) {
+        this.localStream.removeTrack(oldVideo);
+        oldVideo.stop();
+      }
+
       try {
         const vc = this.videoId ? { deviceId: { exact: this.videoId } } : true;
         const cs = await navigator.mediaDevices.getUserMedia({ video: vc });
         const newTrack = cs.getVideoTracks()[0];
+        if (!newTrack) throw new Error("camera track is unavailable");
         newTrack.enabled = this.camOn;
         newTrack.contentHint = "motion";
-
-        const oldVideo = this.localStream.getVideoTracks()[0];
-        if (oldVideo) this.localStream.removeTrack(oldVideo);
-        if (newTrack) this.localStream.addTrack(newTrack);
+        this.localStream.addTrack(newTrack);
 
         for (const pc of this.pcs.values()) {
-          const sender = pc.getSenders().find((s) => s.track?.kind === "video");
-          if (sender) await sender.replaceTrack(newTrack);
+          await this.replaceOrAddTrack(pc, "video", newTrack);
         }
 
         this.$nextTick(() => {
@@ -1071,24 +1246,38 @@ function callApp() {
       } catch (err) {
         console.warn("replace video track failed", err);
         this.camOn = false;
+        for (const pc of this.pcs.values()) {
+          try { await this.replaceOrAddTrack(pc, "video", null); } catch (_) {}
+        }
       }
     },
 
     async replaceAudioTrack() {
+      const screenAudio = this._screenAudioTrack;
+      if (!screenAudio || !this.localStream) return;
+
       try {
-        const screenAudio = this.localStream.getAudioTracks()[0];
-        if (screenAudio) this.localStream.removeTrack(screenAudio);
+        if (this.localStream.getAudioTracks().includes(screenAudio)) {
+          this.localStream.removeTrack(screenAudio);
+        }
 
         const savedMic = this._savedMicTrack;
-        if (savedMic) this.localStream.addTrack(savedMic);
-        this._savedMicTrack = null;
+        const restoredMic = savedMic && savedMic.readyState !== "ended" ? savedMic : null;
+        if (restoredMic) {
+          restoredMic.enabled = this.micOn;
+          this.localStream.addTrack(restoredMic);
+        } else {
+          this.micOn = false;
+        }
 
         for (const pc of this.pcs.values()) {
-          const sender = pc.getSenders().find((s) => s.track?.kind === "audio");
-          if (sender) await sender.replaceTrack(savedMic ?? null);
+          await this.replaceOrAddTrack(pc, "audio", restoredMic);
         }
       } catch (err) {
         console.warn("replace audio track failed", err);
+      } finally {
+        this._screenAudioTrack = null;
+        this._savedMicTrack = null;
       }
     },
   };
