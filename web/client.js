@@ -14,7 +14,7 @@ function callApp() {
   const RECONNECT_BASE_DELAY_MS = 1000;
   const RECONNECT_MAX_DELAY_MS = 15000;
   const PREFS_KEY = "sozvon.prefs";
-  const SPOTLIGHT_ENABLED = false;
+  const SPOTLIGHT_ENABLED = true;
 
   function loadPrefs() {
     try {
@@ -113,7 +113,6 @@ function callApp() {
     _camWasOn: false,
     speaking: false,
     spotManual: false,
-    spotAuto: false,
     devices: { audioinput: [], audiooutput: [], videoinput: [] },
     audioOutputSupported: false,
 
@@ -503,6 +502,8 @@ function callApp() {
           analyser,
           data: new Float32Array(analyser.fftSize),
           level: 0,
+          speaking: false,
+          lastActive: 0,
         });
       } catch (err) {
         console.warn("audio analysis setup failed", err);
@@ -512,6 +513,10 @@ function callApp() {
     stopAudioAnalysis(id) {
       analysers.delete(id);
       this.setSpeaking(id, false);
+      if (this.activeId === id) {
+        this.activeId = null;
+        this.spotManual = false;
+      }
     },
 
     startSpeakingLoop() {
@@ -522,33 +527,31 @@ function callApp() {
     stopSpeakingLoop() {
       clearInterval(speakTimer);
       speakTimer = null;
-      for (const id of [...analysers.keys()]) this.setSpeaking(id, false);
+      for (const [id, entry] of analysers) {
+        entry.speaking = false;
+        this.setSpeaking(id, false);
+      }
     },
 
     detectSpeaking() {
-      const THRESHOLD = 0.02;
-      let loudest = null;
-      let loudestLevel = 0;
+      const SPEAK_ON = 0.03;
+      const SPEAK_OFF = 0.015;
+      const HOLD_MS = 900;
+      const now = Date.now();
       for (const [id, entry] of analysers) {
         entry.analyser.getFloatTimeDomainData(entry.data);
         let sum = 0;
         for (let i = 0; i < entry.data.length; i++) sum += entry.data[i] * entry.data[i];
         const rms = Math.sqrt(sum / entry.data.length);
-        entry.level = Math.max(rms, entry.level * 0.6);
-        this.setSpeaking(id, entry.level > THRESHOLD);
-        if (id !== "local" && entry.level > loudestLevel) {
-          loudestLevel = entry.level;
-          loudest = id;
+        entry.level = Math.max(rms, entry.level * 0.7);
+        if (entry.level >= SPEAK_ON) entry.lastActive = now;
+        const speaking = entry.speaking
+          ? entry.level >= SPEAK_OFF || now - entry.lastActive < HOLD_MS
+          : entry.level >= SPEAK_ON;
+        if (speaking !== entry.speaking) {
+          entry.speaking = speaking;
+          this.setSpeaking(id, speaking);
         }
-      }
-      if (!SPOTLIGHT_ENABLED || this.spotManual) return;
-      const speaker = loudestLevel > THRESHOLD ? loudest : null;
-      if (speaker && this.activeId !== speaker) {
-        this.activeId = speaker;
-        this.spotAuto = true;
-      } else if (!speaker && this.activeId && this.spotAuto) {
-        this.activeId = null;
-        this.spotAuto = false;
       }
     },
 
@@ -734,7 +737,6 @@ function callApp() {
       } else {
         this.activeId = id;
         this.spotManual = true;
-        this.spotAuto = false;
       }
     },
 
@@ -1105,7 +1107,7 @@ function callApp() {
         audioCtx = null;
       }
       this.speaking = false;
-      this.spotAuto = false;
+      this.spotManual = false;
       this.activeId = null;
       document.title = "Sozvon";
     },
