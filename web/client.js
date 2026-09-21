@@ -52,6 +52,17 @@ function callApp() {
     sender.setParameters(params).catch(() => {});
   }
 
+  const BITRATE_PRESETS = {
+    low: { cam: 500000, screen: 1500000 },
+    medium: { cam: 2000000, screen: 4000000 },
+    high: { cam: 8000000, screen: 16000000 },
+  };
+
+  function bitrateFor(pref, screen) {
+    const p = BITRATE_PRESETS[pref] || BITRATE_PRESETS.medium;
+    return screen ? p.screen : p.cam;
+  }
+
   let audioCtx = null;
   let speakTimer = null;
   let notifyTimer = null;
@@ -63,7 +74,7 @@ function callApp() {
     room: "",
     status: "не подключено",
     connected: false,
-    micOn: false,
+    micOn: true,
     camOn: false,
     localStream: null,
     myColor: "#3498db",
@@ -100,6 +111,7 @@ function callApp() {
     reconnectAttempts: 0,
     reconnectTimer: null,
     codecPref: "auto",
+    bitratePref: "medium",
 
     audioInputId: "",
     audioOutputId: "",
@@ -120,13 +132,14 @@ function callApp() {
       const prefs = loadPrefs();
       if (prefs.name) this.name = prefs.name;
       if (prefs.codecPref) this.codecPref = prefs.codecPref;
+      if (prefs.bitratePref in BITRATE_PRESETS) this.bitratePref = prefs.bitratePref;
       if (prefs.audioInputId) this.audioInputId = prefs.audioInputId;
       if (prefs.audioOutputId) this.audioOutputId = prefs.audioOutputId;
       if (prefs.videoId) this.videoId = prefs.videoId;
       if (isValidColor(prefs.prefColor)) this.prefColor = prefs.prefColor;
       this.room = getRoomFromUrl() || prefs.room || "";
 
-      ["name", "room", "codecPref", "audioInputId", "audioOutputId", "videoId", "prefColor"].forEach((k) =>
+      ["name", "room", "codecPref", "bitratePref", "audioInputId", "audioOutputId", "videoId", "prefColor"].forEach((k) =>
         this.$watch(k, () => this.persist())
       );
       this.$watch("prefColor", () => {
@@ -155,6 +168,7 @@ function callApp() {
         name: this.name,
         room: this.room,
         codecPref: this.codecPref,
+        bitratePref: this.bitratePref,
         audioInputId: this.audioInputId,
         audioOutputId: this.audioOutputId,
         videoId: this.videoId,
@@ -311,7 +325,7 @@ function callApp() {
       if (!pc.getTransceivers) return;
       for (const tr of pc.getTransceivers()) {
         if (tr.sender?.track?.kind !== "video") continue;
-        setVideoBitrate(tr.sender, 2000000);
+        setVideoBitrate(tr.sender, bitrateFor(this.bitratePref, this.screenShare));
       }
     },
 
@@ -353,7 +367,8 @@ function callApp() {
       }
     },
 
-    applyVideoBitrate(bitrate) {
+    applyVideoBitrate() {
+      const bitrate = bitrateFor(this.bitratePref, this.screenShare);
       for (const pc of this.pcs.values()) {
         const sender = pc.getSenders().find((s) => s.track?.kind === "video");
         if (sender) setVideoBitrate(sender, bitrate);
@@ -1193,7 +1208,7 @@ function callApp() {
         }
         this.localStream.addTrack(screenTrack);
         screenTrack.contentHint = "detail";
-        this.applyVideoBitrate(4000000);
+        this.applyVideoBitrate();
 
         if (screenAudio) {
           if (oldAudio) this.localStream.removeTrack(oldAudio);
@@ -1249,7 +1264,7 @@ function callApp() {
         t.onended = null;
         t.stop();
       });
-      this.applyVideoBitrate(2000000);
+      this.applyVideoBitrate();
       await this.replaceVideoTrack();
       await this.replaceAudioTrack();
       this.broadcastState();

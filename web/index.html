@@ -47,26 +47,33 @@
     button.off { background: #555; }
     #status { margin-left: auto; font-size: 13px; opacity: .8; }
     #videos {
+      --pad: 16px;
+      --gap: 10px;
+      --strip: 200px;
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
       grid-auto-rows: minmax(180px, 1fr);
-      gap: 10px;
-      padding: 16px;
+      gap: var(--gap);
+      padding: var(--pad);
       flex: 1;
       min-height: 0;
       overflow: auto;
     }
     #videos.spotlight {
-      grid-template-columns: 1fr 200px;
-      grid-template-rows: 1fr;
+      position: relative;
+      grid-template-columns: 1fr var(--strip);
       grid-auto-rows: min-content;
       overflow: hidden;
     }
     #videos.spotlight .tile.active-lg {
-      grid-column: 1;
-      grid-row: 1;
-      width: 100%;
-      height: 100%;
+      position: absolute;
+      top: var(--pad);
+      left: var(--pad);
+      bottom: var(--pad);
+      right: calc(var(--pad) + var(--strip) + var(--gap));
+      width: auto;
+      height: auto;
+      z-index: 1;
     }
     #videos.spotlight .tile.active-lg video {
       object-fit: contain;
@@ -180,9 +187,10 @@
     @media (max-width: 600px) {
       header { padding: 8px; }
       #videos {
+        --pad: 8px;
+        --gap: 8px;
+        --strip: 120px;
         grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-        padding: 8px;
-        gap: 8px;
       }
     }
   </style>
@@ -241,6 +249,14 @@
         <option value="vp9">VP9</option>
         <option value="h264">H264</option>
         <option value="av1">AV1</option>
+      </select>
+    </label>
+    <label>📶 Качество
+      <select x-model="bitratePref" @change="applyVideoBitrate()" aria-label="Качество видео (битрейт)"
+              title="Низкое — экономия трафика, Среднее — обычное, Высокое — максимальное качество">
+        <option value="low">Низкое</option>
+        <option value="medium">Среднее</option>
+        <option value="high">Высокое</option>
       </select>
     </label>
   </div>
