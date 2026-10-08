@@ -57,12 +57,13 @@ func noCache(next http.Handler) http.Handler {
 
 func runServer(cfg *config.Config) error {
 	server := signaling.NewServer()
+	mux := http.NewServeMux()
 
-	http.Handle("/", noCache(http.FileServer(http.Dir("./web"))))
-	http.HandleFunc("/ws", server.HandleWS)
+	mux.Handle("/", noCache(http.FileServer(http.Dir("./web"))))
+	mux.HandleFunc("/ws", server.HandleWS)
 
 	if cfg.TURN.RelayIP != "" {
-		http.HandleFunc("/turn-config", func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc("/turn-config", func(w http.ResponseWriter, r *http.Request) {
 			addr := net.JoinHostPort(cfg.TURN.RelayIP, strings.TrimPrefix(cfg.TURN.Port, ":"))
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{
@@ -73,6 +74,6 @@ func runServer(cfg *config.Config) error {
 		})
 	}
 
-	slog.Info("server started", "port", cfg.HTTP.Port)
-	return http.ListenAndServe(cfg.HTTP.Port, nil)
+	slog.Info("server started", "port", cfg.HTTP.Port, "media_mode", cfg.Media.Mode)
+	return http.ListenAndServe(cfg.HTTP.Port, mux)
 }

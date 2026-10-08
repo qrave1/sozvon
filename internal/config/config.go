@@ -8,11 +8,16 @@ import (
 
 type Config struct {
 	HTTP http
+	Media media
 	TURN turn
 }
 
 type http struct {
 	Port string `env:"PORT" envDefault:":8000"`
+}
+
+type media struct {
+	Mode string `env:"MEDIA_MODE" envDefault:"mesh"`
 }
 
 type turn struct {
@@ -28,6 +33,9 @@ func New() (*Config, error) {
 	c, err := env.ParseAs[Config]()
 	if err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if c.Media.Mode != "mesh" {
+		return nil, fmt.Errorf("unsupported MEDIA_MODE %q (only mesh is available)", c.Media.Mode)
 	}
 
 	return &c, nil
