@@ -62,10 +62,24 @@ func runServer(cfg *config.Config) error {
 
 	mux.Handle("/", noCache(http.FileServer(http.Dir("./web"))))
 	mux.HandleFunc("/ws", server.HandleWS)
+	mux.HandleFunc("/sfu.html", http.NotFound)
 	if cfg.SFUExperimental {
-		mux.HandleFunc("/sfu/ws", sfu.NewServer().HandleWS)
+		publicIP := cfg.SFUPublicIP
+		if publicIP == "" {
+			publicIP = cfg.TURN.RelayIP
+		}
+		sfuServer, err := sfu.NewServerWithUDP(cfg.SFUUDPPort, publicIP)
+		if err != nil {
+			return err
+		}
+		defer sfuServer.Close()
+		mux.Handle("/sfu", noCache(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.ServeFile(w, r, "./web/sfu.html")
+		})))
+		mux.HandleFunc("/sfu/ws", sfuServer.HandleWS)
+		slog.Info("SFU experimental UDP listener started", "port", cfg.SFUUDPPort, "public_ip", publicIP)
 	} else {
-		mux.HandleFunc("/sfu-test.html", http.NotFound)
+		mux.HandleFunc("/sfu", http.NotFound)
 	}
 
 	if cfg.TURN.RelayIP != "" {

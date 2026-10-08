@@ -36,13 +36,20 @@
       video.autoplay = true;
       video.playsInline = true;
       video.muted = muted;
+      const avatar = document.createElement("div");
+      avatar.className = "avatar";
+      avatar.textContent = muted ? "Вы" : id.slice(0, 2).toUpperCase();
       const label = document.createElement("div");
       label.className = "label";
       label.textContent = muted ? "Вы" : id.slice(0, 8);
-      tile.append(video, label);
+      tile.append(video, avatar, label);
       videos.append(tile);
     }
-    tile.querySelector("video").srcObject = stream;
+    const hasVideo = !!stream?.getVideoTracks().length;
+    const video = tile.querySelector("video");
+    video.srcObject = stream;
+    video.hidden = !hasVideo;
+    tile.querySelector(".avatar").hidden = hasVideo;
   }
 
   function onTrack(event) {
@@ -58,7 +65,9 @@
       stream.removeTrack(event.track);
       if (!stream.getTracks().length) {
         remoteStreams.delete(streamId);
-        document.getElementById(`tile-${streamId}`)?.remove();
+        addTile(streamId, null);
+      } else {
+        addTile(streamId, stream);
       }
     };
   }
@@ -72,11 +81,28 @@
     });
   }
 
+  async function loadIceServers() {
+    try {
+      const response = await fetch("/turn-config");
+      if (!response.ok) return [];
+      const config = await response.json();
+      return config.urls ? [{ urls: config.urls, username: config.username, credential: config.credential }] : [];
+    } catch {
+      return [];
+    }
+  }
+
   async function handleMessage(message) {
     if (!pc || !ws || ws.readyState !== WebSocket.OPEN) return;
     if (message.type === "joined") {
       await pc.setRemoteDescription(message.data.answer);
+      for (const id of message.data.peers || []) addTile(id, null);
       setStatus(`В комнате: ${roomInput.value}`);
+    } else if (message.type === "peer_joined") {
+      addTile(message.data.id, null);
+    } else if (message.type === "peer_left") {
+      remoteStreams.delete(message.data.id);
+      document.getElementById(`tile-${message.data.id}`)?.remove();
     } else if (message.type === "offer") {
       await pc.setRemoteDescription(message.data);
       await pc.setLocalDescription(await pc.createAnswer());
@@ -91,7 +117,7 @@
     setStatus("Подключение...");
     buttons.join.disabled = true;
     try {
-      pc = new RTCPeerConnection();
+      pc = new RTCPeerConnection({ iceServers: await loadIceServers() });
       pc.ontrack = onTrack;
       pc.onconnectionstatechange = () => {
         if (pc) setStatus(`${room}: ${pc.connectionState}`);
@@ -100,11 +126,16 @@
       try {
         media = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
       } catch {
-        media = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        try {
+          media = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        } catch {
+          media = new MediaStream();
+        }
       }
       localStream = media;
       cameraTrack = media.getVideoTracks()[0] || null;
       for (const track of media.getTracks()) pc.addTrack(track, media);
+      if (!media.getAudioTracks().length) pc.addTransceiver("audio", { direction: "recvonly" });
       if (!cameraTrack) pc.addTransceiver("video", { direction: "recvonly" });
       addTile("local", media, true);
 

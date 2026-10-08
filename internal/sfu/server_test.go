@@ -2,8 +2,10 @@ package sfu
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +19,9 @@ type testPeer struct {
 	pc       *webrtc.PeerConnection
 	ws       *websocket.Conn
 	packets  chan *rtp.Packet
+	events   chan message
+	answer   webrtc.SessionDescription
+	peers    []string
 	readDone chan struct{}
 }
 
@@ -27,7 +32,7 @@ func connectTestPeer(t *testing.T, wsURL, roomID string, kind webrtc.RTPCodecTyp
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { pc.Close() })
-	p := &testPeer{pc: pc, packets: make(chan *rtp.Packet, 1), readDone: make(chan struct{})}
+	p := &testPeer{pc: pc, packets: make(chan *rtp.Packet, 1), events: make(chan message, 8), readDone: make(chan struct{})}
 	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		packet, _, err := track.ReadRTP()
 		if err == nil {
@@ -85,6 +90,7 @@ func connectTestPeer(t *testing.T, wsURL, roomID string, kind webrtc.RTPCodecTyp
 	}
 	var payload struct {
 		Answer webrtc.SessionDescription `json:"answer"`
+		Peers  []string                  `json:"peers"`
 	}
 	if err := json.Unmarshal(joined.Data, &payload); err != nil {
 		t.Fatal(err)
@@ -92,6 +98,8 @@ func connectTestPeer(t *testing.T, wsURL, roomID string, kind webrtc.RTPCodecTyp
 	if err := pc.SetRemoteDescription(payload.Answer); err != nil {
 		t.Fatal(err)
 	}
+	p.answer = payload.Answer
+	p.peers = payload.Peers
 	ws.SetReadDeadline(time.Time{})
 	go func() {
 		defer close(p.readDone)
@@ -101,6 +109,10 @@ func connectTestPeer(t *testing.T, wsURL, roomID string, kind webrtc.RTPCodecTyp
 				return
 			}
 			if msg.Type != "offer" {
+				select {
+				case p.events <- msg:
+				default:
+				}
 				continue
 			}
 			var remoteOffer webrtc.SessionDescription
@@ -123,6 +135,66 @@ func connectTestPeer(t *testing.T, wsURL, roomID string, kind webrtc.RTPCodecTyp
 		}
 	}()
 	return p, outgoing
+}
+
+func TestRoomRoster(t *testing.T) {
+	server := NewServer()
+	httpServer := httptest.NewServer(http.HandlerFunc(server.HandleWS))
+	defer httpServer.Close()
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http")
+	first, _ := connectTestPeer(t, wsURL, "roster", webrtc.RTPCodecTypeAudio, false)
+	second, _ := connectTestPeer(t, wsURL, "roster", webrtc.RTPCodecTypeAudio, false)
+	if len(second.peers) != 1 {
+		t.Fatalf("joined roster has %d peers, want 1", len(second.peers))
+	}
+	select {
+	case msg := <-first.events:
+		if msg.Type != "peer_joined" {
+			t.Fatalf("got %q, want peer_joined", msg.Type)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first peer did not receive peer_joined")
+	}
+	second.ws.Close()
+	select {
+	case msg := <-first.events:
+		if msg.Type != "peer_left" {
+			t.Fatalf("got %q, want peer_left", msg.Type)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first peer did not receive peer_left")
+	}
+}
+
+func TestPublicICECandidate(t *testing.T) {
+	listener, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := uint16(listener.LocalAddr().(*net.UDPAddr).Port)
+	listener.Close()
+	server, err := NewServerWithUDP(port, "203.0.113.5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	httpServer := httptest.NewServer(http.HandlerFunc(server.HandleWS))
+	defer httpServer.Close()
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http")
+	peer, _ := connectTestPeer(t, wsURL, "ice", webrtc.RTPCodecTypeAudio, false)
+	publicCandidate := false
+	privateCandidate := false
+	for _, line := range strings.Split(peer.answer.SDP, "\n") {
+		if strings.Contains(line, "203.0.113.5 "+strconv.Itoa(int(port))) && strings.Contains(line, "typ host") {
+			publicCandidate = true
+		}
+		if strings.HasPrefix(line, "a=candidate:") && strings.Contains(line, "typ host") && !strings.Contains(line, "203.0.113.5 ") {
+			privateCandidate = true
+		}
+	}
+	if !publicCandidate || !privateCandidate {
+		t.Fatalf("answer must advertise public and local host candidates: %s", peer.answer.SDP)
+	}
 }
 
 func TestForwardsRTPWithinRoom(t *testing.T) {

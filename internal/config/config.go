@@ -9,7 +9,9 @@ import (
 type Config struct {
 	HTTP            http
 	Media           media
-	SFUExperimental bool `env:"SFU_EXPERIMENTAL" envDefault:"false"`
+	SFUExperimental bool   `env:"SFU_EXPERIMENTAL" envDefault:"false"`
+	SFUUDPPort      uint16 `env:"SFU_UDP_PORT" envDefault:"40000"`
+	SFUPublicIP     string `env:"SFU_PUBLIC_IP"`
 	TURN            turn
 }
 

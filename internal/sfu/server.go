@@ -3,9 +3,12 @@ package sfu
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -44,12 +47,64 @@ type room struct {
 }
 
 type Server struct {
-	mu    sync.Mutex
-	rooms map[string]*room
+	mu      sync.Mutex
+	rooms   map[string]*room
+	api     *webrtc.API
+	udpConn net.PacketConn
 }
 
 func NewServer() *Server {
-	return &Server{rooms: make(map[string]*room)}
+	return &Server{rooms: make(map[string]*room), api: webrtc.NewAPI()}
+}
+
+func NewServerWithUDP(port uint16, publicIP string) (*Server, error) {
+	if port == 0 {
+		return nil, errors.New("SFU UDP port is required")
+	}
+	if publicIP != "" && net.ParseIP(publicIP) == nil {
+		return nil, fmt.Errorf("invalid SFU public IP %q", publicIP)
+	}
+	conn, err := net.ListenPacket("udp4", net.JoinHostPort("0.0.0.0", strconv.Itoa(int(port))))
+	if err != nil {
+		return nil, fmt.Errorf("listen SFU UDP: %w", err)
+	}
+	settings := webrtc.SettingEngine{}
+	settings.SetICEUDPMux(webrtc.NewICEUDPMux(nil, conn))
+	if publicIP != "" {
+		if err := settings.SetICEAddressRewriteRules(webrtc.ICEAddressRewriteRule{
+			External:        []string{publicIP},
+			AsCandidateType: webrtc.ICECandidateTypeHost,
+			Mode:            webrtc.ICEAddressRewriteAppend,
+		}); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("configure SFU public IP: %w", err)
+		}
+	}
+	return &Server{
+		rooms:   make(map[string]*room),
+		api:     webrtc.NewAPI(webrtc.WithSettingEngine(settings)),
+		udpConn: conn,
+	}, nil
+}
+
+func (s *Server) Close() error {
+	s.mu.Lock()
+	peers := make([]*peer, 0)
+	for _, r := range s.rooms {
+		r.mu.RLock()
+		for _, p := range r.peers {
+			peers = append(peers, p)
+		}
+		r.mu.RUnlock()
+	}
+	s.mu.Unlock()
+	for _, p := range peers {
+		p.close(s)
+	}
+	if s.udpConn != nil {
+		return s.udpConn.Close()
+	}
+	return nil
 }
 
 func (s *Server) addPeer(id string, p *peer) {
@@ -87,6 +142,7 @@ type peer struct {
 
 	negMu         sync.Mutex
 	ready         bool
+	announced     bool
 	dirty         bool
 	subscriptions map[string]*webrtc.RTPSender
 }
@@ -125,7 +181,7 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	pc, err := s.api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		slog.Error("sfu peer creation failed", "error", err)
 		ws.Close()
@@ -143,9 +199,15 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 		p.publish(track)
 	})
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
+		if state == webrtc.PeerConnectionStateFailed {
+			slog.Warn("sfu peer connection failed", "peer", p.id, "room", p.room.id)
+			go p.close(s)
+		} else if state == webrtc.PeerConnectionStateClosed {
 			go p.close(s)
 		}
+	})
+	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		slog.Info("sfu ICE state changed", "peer", p.id, "room", p.room.id, "state", state.String())
 	})
 
 	go p.writeLoop()
@@ -154,10 +216,14 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 		p.close(s)
 		return
 	}
+	p.announce()
 
 	for {
 		var msg message
 		if err := ws.ReadJSON(&msg); err != nil {
+			if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				slog.Info("sfu websocket read ended", "peer", p.id, "room", p.room.id, "error", err)
+			}
 			break
 		}
 		switch msg.Type {
@@ -246,9 +312,27 @@ func (p *peer) acceptOffer(offer webrtc.SessionDescription) error {
 	<-gatherComplete
 	p.ready = true
 	p.dirty = false
-	p.sendMessage("joined", map[string]any{"id": p.id, "answer": p.pc.LocalDescription()})
 	p.requestKeyframes()
 	return nil
+}
+
+func (p *peer) announce() {
+	r := p.room
+	r.mu.Lock()
+	peers := make([]*peer, 0, len(r.peers))
+	ids := make([]string, 0, len(r.peers))
+	for _, other := range r.peers {
+		if other != p && other.announced {
+			peers = append(peers, other)
+			ids = append(ids, other.id)
+		}
+	}
+	p.announced = true
+	p.sendMessage("joined", map[string]any{"id": p.id, "answer": p.pc.LocalDescription(), "peers": ids})
+	r.mu.Unlock()
+	for _, other := range peers {
+		other.sendMessage("peer_joined", map[string]any{"id": p.id})
+	}
 }
 
 func (p *peer) acceptAnswer(answer webrtc.SessionDescription) error {
@@ -407,6 +491,14 @@ func (p *peer) close(s *Server) {
 		r := p.room
 		r.mu.Lock()
 		delete(r.peers, p.id)
+		peers := make([]*peer, 0, len(r.peers))
+		if p.announced {
+			for _, other := range r.peers {
+				if other.announced {
+					peers = append(peers, other)
+				}
+			}
+		}
 		publications := make([]*publication, 0)
 		for _, pub := range r.publications {
 			if pub.owner == p {
@@ -414,6 +506,9 @@ func (p *peer) close(s *Server) {
 			}
 		}
 		r.mu.Unlock()
+		for _, other := range peers {
+			other.sendMessage("peer_left", map[string]any{"id": p.id})
+		}
 		for _, pub := range publications {
 			r.removePublication(pub)
 		}

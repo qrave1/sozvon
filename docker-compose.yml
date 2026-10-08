@@ -5,6 +5,8 @@ services:
         restart: always
         env_file:
             - .env
+        ports:
+            - "${SFU_UDP_PORT:-40000}:${SFU_UDP_PORT:-40000}/udp"
         networks:
             - traefik
         labels:
