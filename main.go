@@ -12,6 +12,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/qrave1/sozvon/internal/config"
+	"github.com/qrave1/sozvon/internal/sfu"
 	"github.com/qrave1/sozvon/internal/signaling"
 	"github.com/qrave1/sozvon/internal/turnserver"
 )
@@ -61,6 +62,11 @@ func runServer(cfg *config.Config) error {
 
 	mux.Handle("/", noCache(http.FileServer(http.Dir("./web"))))
 	mux.HandleFunc("/ws", server.HandleWS)
+	if cfg.SFUExperimental {
+		mux.HandleFunc("/sfu/ws", sfu.NewServer().HandleWS)
+	} else {
+		mux.HandleFunc("/sfu-test.html", http.NotFound)
+	}
 
 	if cfg.TURN.RelayIP != "" {
 		mux.HandleFunc("/turn-config", func(w http.ResponseWriter, r *http.Request) {
@@ -74,6 +80,6 @@ func runServer(cfg *config.Config) error {
 		})
 	}
 
-	slog.Info("server started", "port", cfg.HTTP.Port, "media_mode", cfg.Media.Mode)
+	slog.Info("server started", "port", cfg.HTTP.Port, "media_mode", cfg.Media.Mode, "sfu_experimental", cfg.SFUExperimental)
 	return http.ListenAndServe(cfg.HTTP.Port, mux)
 }

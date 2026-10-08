@@ -7,9 +7,10 @@ import (
 )
 
 type Config struct {
-	HTTP http
-	Media media
-	TURN turn
+	HTTP            http
+	Media           media
+	SFUExperimental bool `env:"SFU_EXPERIMENTAL" envDefault:"false"`
+	TURN            turn
 }
 
 type http struct {

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sozvon SFU</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; font-family: system-ui, sans-serif; background: #14171b; color: #f1f3f5; }
+    header { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px; background: #242a30; }
+    input, button { min-height: 38px; border-radius: 5px; font: inherit; }
+    input { width: min(220px, 100%); padding: 7px 10px; border: 1px solid #57616a; background: #15191d; color: inherit; }
+    button { padding: 7px 12px; border: 0; background: #2879d0; color: white; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: default; }
+    button[aria-pressed="true"] { background: #666; }
+    #status { margin-left: auto; font-size: 13px; }
+    main { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; padding: 12px; }
+    .tile { position: relative; min-height: 200px; aspect-ratio: 4 / 3; background: #000; border-radius: 6px; overflow: hidden; }
+    video { width: 100%; height: 100%; object-fit: contain; }
+    .label { position: absolute; left: 8px; bottom: 8px; padding: 3px 7px; background: #111b; font-size: 12px; border-radius: 3px; }
+    @media (max-width: 600px) { header { align-items: stretch; } #status { width: 100%; margin-left: 0; } }
+  </style>
+</head>
+<body>
+  <header>
+    <input id="room" aria-label="Комната" placeholder="Комната">
+    <button id="join">Войти</button>
+    <button id="leave" disabled>Выйти</button>
+    <button id="mic" disabled aria-pressed="false" title="Микрофон">🎤</button>
+    <button id="cam" disabled aria-pressed="false" title="Камера">📹</button>
+    <button id="screen" disabled aria-pressed="false" title="Экран">🖥️</button>
+    <span id="status" role="status" aria-live="polite">Не подключено</span>
+  </header>
+  <main id="videos"></main>
+  <script src="/sfu-test.js"></script>
+</body>
+</html>
