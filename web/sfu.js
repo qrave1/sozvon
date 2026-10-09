@@ -108,7 +108,7 @@
     let tile = document.getElementById(`tile-${id}`);
     if (!tile) {
       tile = document.createElement("div");
-      tile.className = "tile";
+      tile.className = "tile group relative overflow-hidden rounded-2xl border border-line bg-slate-950 shadow-lg transition duration-200 hover:border-slate-500";
       tile.id = `tile-${id}`;
       const video = document.createElement("video");
       video.autoplay = true;
@@ -116,20 +116,20 @@
       const audio = document.createElement("audio");
       audio.autoplay = true;
       const avatar = document.createElement("div");
-      avatar.className = "avatar";
+      avatar.className = "avatar text-5xl font-bold";
       const label = document.createElement("div");
-      label.className = "label";
+      label.className = "label rounded-lg border border-white/10 bg-slate-950/75 px-2 py-1 text-xs font-medium text-white backdrop-blur";
       const badge = document.createElement("div");
-      badge.className = "badge";
+      badge.className = "badge rounded-lg border border-indigo-300/20 bg-indigo-950/80 px-2 py-1 text-[11px] font-medium text-indigo-100 backdrop-blur";
       const mute = document.createElement("button");
-      mute.className = "peer-mute";
+      mute.className = "peer-mute rounded-lg border border-white/10 bg-slate-950/75 px-2 py-1 text-xs text-white opacity-0 backdrop-blur transition group-hover:opacity-100";
       mute.onclick = (event) => {
         event.stopPropagation();
         if (mutedPeers.has(id)) mutedPeers.delete(id); else mutedPeers.add(id);
         renderTile(id);
       };
       const fullscreen = document.createElement("button");
-      fullscreen.className = "peer-fullscreen";
+      fullscreen.className = "peer-fullscreen rounded-lg border border-white/10 bg-slate-950/75 px-2 py-1 text-xs text-white opacity-0 backdrop-blur transition group-hover:opacity-100";
       fullscreen.textContent = "⛶";
       fullscreen.title = "Во весь экран";
       fullscreen.setAttribute("aria-label", "Во весь экран");
