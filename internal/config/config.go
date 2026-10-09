@@ -7,20 +7,14 @@ import (
 )
 
 type Config struct {
-	HTTP            http
-	Media           media
-	SFUExperimental bool   `env:"SFU_EXPERIMENTAL" envDefault:"false"`
-	SFUUDPPort      uint16 `env:"SFU_UDP_PORT" envDefault:"40000"`
-	SFUPublicIP     string `env:"SFU_PUBLIC_IP"`
-	TURN            turn
+	HTTP        http
+	SFUUDPPort  uint16 `env:"SFU_UDP_PORT" envDefault:"40000"`
+	SFUPublicIP string `env:"SFU_PUBLIC_IP"`
+	TURN        turn
 }
 
 type http struct {
 	Port string `env:"PORT" envDefault:":8000"`
-}
-
-type media struct {
-	Mode string `env:"MEDIA_MODE" envDefault:"mesh"`
 }
 
 type turn struct {
@@ -37,9 +31,5 @@ func New() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
-	if c.Media.Mode != "mesh" {
-		return nil, fmt.Errorf("unsupported MEDIA_MODE %q (only mesh is available)", c.Media.Mode)
-	}
-
 	return &c, nil
 }

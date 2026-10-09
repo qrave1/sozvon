@@ -57,30 +57,29 @@ func noCache(next http.Handler) http.Handler {
 }
 
 func runServer(cfg *config.Config) error {
-	server := signaling.NewServer()
-	mux := http.NewServeMux()
-
-	mux.Handle("/", noCache(http.FileServer(http.Dir("./web"))))
-	mux.HandleFunc("/ws", server.HandleWS)
-	mux.HandleFunc("/sfu.html", http.NotFound)
-	if cfg.SFUExperimental {
-		publicIP := cfg.SFUPublicIP
-		if publicIP == "" {
-			publicIP = cfg.TURN.RelayIP
-		}
-		sfuServer, err := sfu.NewServerWithUDP(cfg.SFUUDPPort, publicIP)
-		if err != nil {
-			return err
-		}
-		defer sfuServer.Close()
-		mux.Handle("/sfu", noCache(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.ServeFile(w, r, "./web/sfu.html")
-		})))
-		mux.HandleFunc("/sfu/ws", sfuServer.HandleWS)
-		slog.Info("SFU experimental UDP listener started", "port", cfg.SFUUDPPort, "public_ip", publicIP)
-	} else {
-		mux.HandleFunc("/sfu", http.NotFound)
+	publicIP := cfg.SFUPublicIP
+	if publicIP == "" {
+		publicIP = cfg.TURN.RelayIP
 	}
+	sfuServer, err := sfu.NewServerWithUDP(cfg.SFUUDPPort, publicIP)
+	if err != nil {
+		return err
+	}
+	defer sfuServer.Close()
+	slog.Info("SFU UDP listener started", "port", cfg.SFUUDPPort, "public_ip", publicIP)
+	slog.Info("server started", "port", cfg.HTTP.Port)
+	return http.ListenAndServe(cfg.HTTP.Port, newHandler(cfg, signaling.NewServer(), sfuServer))
+}
+
+func newHandler(cfg *config.Config, meshServer *signaling.Server, sfuServer *sfu.Server) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/", noCache(http.FileServer(http.Dir("./web"))))
+	mux.HandleFunc("/ws", meshServer.HandleWS)
+	mux.HandleFunc("/sfu.html", http.NotFound)
+	mux.Handle("/sfu", noCache(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "./web/sfu.html")
+	})))
+	mux.HandleFunc("/sfu/ws", sfuServer.HandleWS)
 
 	if cfg.TURN.RelayIP != "" {
 		mux.HandleFunc("/turn-config", func(w http.ResponseWriter, r *http.Request) {
@@ -94,6 +93,5 @@ func runServer(cfg *config.Config) error {
 		})
 	}
 
-	slog.Info("server started", "port", cfg.HTTP.Port, "media_mode", cfg.Media.Mode, "sfu_experimental", cfg.SFUExperimental)
-	return http.ListenAndServe(cfg.HTTP.Port, mux)
+	return mux
 }
