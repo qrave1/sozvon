@@ -4,28 +4,36 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sozvon SFU</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: { extend: { colors: { ink: '#e8edf7', panel: '#151b29', line: '#283248', accent: '#6d8cff' } } }
+    };
+  </script>
   <style>
     * { box-sizing: border-box; }
     [hidden] { display: none !important; }
-    body { margin: 0; height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; font-family: system-ui, -apple-system, sans-serif; background: #0f1115; color: #e6e6e6; }
-    header { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px 16px; background: #1a1d24; }
+    body { margin: 0; height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; background: #0b1020; color: #e8edf7; }
+    header { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px 18px; background: rgba(21, 27, 41, .94); border-bottom: 1px solid #283248; }
     input, select, button { font: inherit; }
-    header input { width: min(190px, 100%); padding: 8px 10px; border: 1px solid #333; border-radius: 6px; background: #11131a; color: #fff; }
-    button { padding: 8px 12px; border: 0; border-radius: 6px; background: #2f6feb; color: #fff; cursor: pointer; font-size: 14px; }
+    header input { width: min(190px, 100%); padding: 9px 11px; border: 1px solid #34405a; border-radius: 10px; background: #0f1627; color: #fff; outline: none; }
+    header input:focus, select:focus { border-color: #6d8cff; box-shadow: 0 0 0 3px rgba(109,140,255,.18); }
+    button { padding: 9px 13px; border: 1px solid transparent; border-radius: 10px; background: #617ff5; color: #fff; cursor: pointer; font-size: 14px; font-weight: 600; transition: background .16s, transform .16s; }
+    button:hover:not(:disabled) { background: #7892ff; transform: translateY(-1px); }
     button:disabled { opacity: .5; cursor: default; }
     button[aria-pressed="true"] { background: #555; }
-    #leave { background: #c0392b; }
+    #leave { background: #d34d5a; }
     #status { margin-left: auto; font-size: 13px; opacity: .85; }
-    .device-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 16px; background: #15181e; border-bottom: 1px solid #292d35; }
+    .device-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 18px; background: #101728; border-bottom: 1px solid #283248; }
     .device-bar label { display: flex; align-items: center; gap: 5px; font-size: 12px; }
-    .device-bar select { max-width: 170px; padding: 5px 8px; border: 1px solid #333; border-radius: 6px; background: #11131a; color: #fff; }
+    .device-bar select { max-width: 170px; padding: 7px 9px; border: 1px solid #34405a; border-radius: 9px; background: #0f1627; color: #fff; }
     .device-bar select:disabled { opacity: .5; }
-    #videos { --pad: 16px; --gap: 10px; --strip: 200px; flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); grid-auto-rows: minmax(180px, 1fr); gap: var(--gap); padding: var(--pad); overflow: auto; }
+    #videos { --pad: 18px; --gap: 12px; --strip: 210px; flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); grid-auto-rows: minmax(180px, 1fr); gap: var(--gap); padding: var(--pad); overflow: auto; }
     #videos.spotlight { position: relative; grid-template-columns: 1fr var(--strip); grid-auto-rows: min-content; overflow: hidden; }
     #videos.spotlight .tile.active-lg { position: absolute; inset: var(--pad) calc(var(--pad) + var(--strip) + var(--gap)) var(--pad) var(--pad); width: auto; height: auto; z-index: 1; }
     #videos.spotlight .tile:not(.active-lg) { grid-column: 2; min-height: 0; max-height: 130px; aspect-ratio: 4 / 3; }
     #videos.spotlight .tile:not(.active-lg) video { object-fit: cover; }
-    .tile { position: relative; min-height: 180px; background: #000; border-radius: 8px; overflow: hidden; cursor: pointer; }
+    .tile { position: relative; min-height: 180px; background: #05070d; border: 1px solid #283248; border-radius: 14px; overflow: hidden; cursor: pointer; box-shadow: 0 12px 30px rgba(0,0,0,.2); }
     .tile video { width: 100%; height: 100%; object-fit: contain; background: #000; }
     .tile:fullscreen { border-radius: 0; }
     .tile.speaking { box-shadow: inset 0 0 0 3px #2ecc71; }
@@ -46,15 +54,20 @@
 </head>
 <body>
   <header>
-    <input id="name" aria-label="Ваше имя" placeholder="Ваше имя" maxlength="64">
-    <input id="room" aria-label="ID комнаты" placeholder="ID комнаты" maxlength="128">
-    <button id="join">Войти</button>
-    <button id="leave" hidden>Выйти</button>
-    <button id="mic" aria-pressed="false" title="Микрофон" aria-label="Переключить микрофон">🎤</button>
-    <button id="cam" aria-pressed="true" title="Камера" aria-label="Переключить камеру">📹</button>
-    <button id="screen" hidden title="Демонстрация экрана" aria-label="Демонстрация экрана">🖥</button>
-    <button id="share" hidden title="Скопировать ссылку" aria-label="Скопировать ссылку">🔗</button>
-    <button id="settings" aria-pressed="false" title="Настройки устройств" aria-label="Настройки устройств">⚙</button>
+    <div class="flex items-center gap-3 mr-2"><div class="grid h-9 w-9 place-items-center rounded-xl bg-accent font-bold text-white">S</div><div><div class="text-sm font-semibold text-white">Sozvon</div><div class="text-[11px] text-slate-400">SFU room</div></div></div>
+    <div class="flex flex-1 flex-wrap items-center gap-2">
+      <input id="name" aria-label="Ваше имя" placeholder="Ваше имя" maxlength="64">
+      <input id="room" aria-label="ID комнаты" placeholder="ID комнаты" maxlength="128">
+      <button id="join">Войти в комнату</button>
+      <button id="leave" hidden>Выйти</button>
+    </div>
+    <div class="flex items-center gap-2">
+      <button id="mic" aria-pressed="false" title="Микрофон" aria-label="Переключить микрофон">🎤</button>
+      <button id="cam" aria-pressed="true" title="Камера" aria-label="Переключить камеру">📹</button>
+      <button id="screen" hidden title="Демонстрация экрана" aria-label="Демонстрация экрана">🖥</button>
+      <button id="share" hidden title="Скопировать ссылку" aria-label="Скопировать ссылку">🔗</button>
+      <button id="settings" aria-pressed="false" title="Настройки устройств" aria-label="Настройки устройств">⚙</button>
+    </div>
     <span id="status" role="status" aria-live="polite">Не подключено</span>
   </header>
   <div id="device-bar" class="device-bar" hidden>
@@ -73,7 +86,8 @@
       <option value="low">Низкое</option><option value="medium">Среднее</option><option value="high">Высокое</option>
     </select></label>
   </div>
-  <main id="videos"></main>
+  <main id="videos" aria-label="Участники комнаты"></main>
+  <footer class="border-t border-line bg-panel px-4 py-2 text-center text-xs text-slate-400">Нажмите на видео, чтобы открыть режим фокуса · звук участников воспроизводится отдельно</footer>
   <script src="/sfu.js"></script>
 </body>
 </html>
