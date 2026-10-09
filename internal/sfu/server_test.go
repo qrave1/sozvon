@@ -16,23 +16,42 @@ import (
 )
 
 type testPeer struct {
-	pc       *webrtc.PeerConnection
-	ws       *websocket.Conn
-	packets  chan *rtp.Packet
-	events   chan message
-	answer   webrtc.SessionDescription
-	peers    []string
-	readDone chan struct{}
+	id         string
+	pc         *webrtc.PeerConnection
+	ws         *websocket.Conn
+	packets    chan *rtp.Packet
+	events     chan message
+	candidates chan webrtc.ICECandidateInit
+	send       chan message
+	done       chan struct{}
+	answer     webrtc.SessionDescription
+	peers      []string
+	profiles   map[string]peerProfile
+	readDone   chan struct{}
 }
 
-func connectTestPeer(t *testing.T, wsURL, roomID string, kind webrtc.RTPCodecType, publish bool) (*testPeer, *webrtc.TrackLocalStaticRTP) {
+func connectTestPeer(t *testing.T, wsURL, roomID string, kind webrtc.RTPCodecType, publish bool, profile ...peerProfile) (*testPeer, *webrtc.TrackLocalStaticRTP) {
 	t.Helper()
 	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { pc.Close() })
-	p := &testPeer{pc: pc, packets: make(chan *rtp.Packet, 1), events: make(chan message, 8), readDone: make(chan struct{})}
+	p := &testPeer{
+		pc: pc, packets: make(chan *rtp.Packet, 1), events: make(chan message, 8),
+		candidates: make(chan webrtc.ICECandidateInit, 32), send: make(chan message, 64),
+		done: make(chan struct{}), readDone: make(chan struct{}),
+	}
+	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+		if candidate == nil {
+			return
+		}
+		data, _ := json.Marshal(candidate.ToJSON())
+		select {
+		case p.send <- message{Type: "candidate", Data: data}:
+		case <-p.done:
+		}
+	})
 	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		packet, _, err := track.ReadRTP()
 		if err == nil {
@@ -65,32 +84,62 @@ func connectTestPeer(t *testing.T, wsURL, roomID string, kind webrtc.RTPCodecTyp
 	if err != nil {
 		t.Fatal(err)
 	}
-	gatherComplete := webrtc.GatheringCompletePromise(pc)
 	if err := pc.SetLocalDescription(offer); err != nil {
 		t.Fatal(err)
 	}
-	<-gatherComplete
 	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	p.ws = ws
 	t.Cleanup(func() { ws.Close() })
+	t.Cleanup(func() { close(p.done) })
 	joinData, _ := json.Marshal(pc.LocalDescription())
-	if err := ws.WriteJSON(message{Type: "join", Room: roomID, Data: joinData}); err != nil {
+	join := message{Type: "join", Room: roomID, Data: joinData}
+	if len(profile) > 0 {
+		join.Profile, _ = json.Marshal(profile[0])
+	}
+	if err := ws.WriteJSON(join); err != nil {
 		t.Fatal(err)
 	}
+	go func() {
+		for {
+			select {
+			case msg := <-p.send:
+				if ws.WriteJSON(msg) != nil {
+					return
+				}
+			case <-p.done:
+				return
+			}
+		}
+	}()
 	ws.SetReadDeadline(time.Now().Add(10 * time.Second))
 	var joined message
-	if err := ws.ReadJSON(&joined); err != nil {
-		t.Fatal(err)
-	}
-	if joined.Type != "joined" {
-		t.Fatalf("expected joined, got %q", joined.Type)
+	var pending []webrtc.ICECandidateInit
+	for joined.Type != "joined" {
+		var msg message
+		if err := ws.ReadJSON(&msg); err != nil {
+			t.Fatal(err)
+		}
+		if msg.Type == "candidate" {
+			var candidate webrtc.ICECandidateInit
+			if err := json.Unmarshal(msg.Data, &candidate); err != nil {
+				t.Fatal(err)
+			}
+			pending = append(pending, candidate)
+			p.candidates <- candidate
+		} else if msg.Type == "joined" {
+			joined = msg
+		} else {
+			t.Fatalf("expected joined or candidate, got %q", msg.Type)
+		}
 	}
 	var payload struct {
-		Answer webrtc.SessionDescription `json:"answer"`
-		Peers  []string                  `json:"peers"`
+		ID       string                    `json:"id"`
+		Answer   webrtc.SessionDescription `json:"answer"`
+		Peers    []string                  `json:"peers"`
+		Profiles map[string]peerProfile    `json:"profiles"`
 	}
 	if err := json.Unmarshal(joined.Data, &payload); err != nil {
 		t.Fatal(err)
@@ -98,8 +147,15 @@ func connectTestPeer(t *testing.T, wsURL, roomID string, kind webrtc.RTPCodecTyp
 	if err := pc.SetRemoteDescription(payload.Answer); err != nil {
 		t.Fatal(err)
 	}
+	for _, candidate := range pending {
+		if err := pc.AddICECandidate(candidate); err != nil {
+			t.Fatal(err)
+		}
+	}
 	p.answer = payload.Answer
+	p.id = payload.ID
 	p.peers = payload.Peers
+	p.profiles = payload.Profiles
 	ws.SetReadDeadline(time.Time{})
 	go func() {
 		defer close(p.readDone)
@@ -107,6 +163,17 @@ func connectTestPeer(t *testing.T, wsURL, roomID string, kind webrtc.RTPCodecTyp
 			var msg message
 			if err := ws.ReadJSON(&msg); err != nil {
 				return
+			}
+			if msg.Type == "candidate" {
+				var candidate webrtc.ICECandidateInit
+				if json.Unmarshal(msg.Data, &candidate) != nil || pc.AddICECandidate(candidate) != nil {
+					return
+				}
+				select {
+				case p.candidates <- candidate:
+				default:
+				}
+				continue
 			}
 			if msg.Type != "offer" {
 				select {
@@ -123,13 +190,13 @@ func connectTestPeer(t *testing.T, wsURL, roomID string, kind webrtc.RTPCodecTyp
 			if err != nil {
 				return
 			}
-			gather := webrtc.GatheringCompletePromise(pc)
 			if pc.SetLocalDescription(answer) != nil {
 				return
 			}
-			<-gather
 			data, _ := json.Marshal(pc.LocalDescription())
-			if ws.WriteJSON(message{Type: "answer", Data: data}) != nil {
+			select {
+			case p.send <- message{Type: "answer", Data: data}:
+			case <-p.done:
 				return
 			}
 		}
@@ -166,6 +233,169 @@ func TestRoomRoster(t *testing.T) {
 	}
 }
 
+func TestPeerProfiles(t *testing.T) {
+	server := NewServer()
+	httpServer := httptest.NewServer(http.HandlerFunc(server.HandleWS))
+	defer httpServer.Close()
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http")
+	firstProfile := peerProfile{Name: "Аня", MicOn: true, CamOn: false, Color: "#3498db"}
+	first, _ := connectTestPeer(t, wsURL, "profiles", webrtc.RTPCodecTypeAudio, false, firstProfile)
+	secondProfile := peerProfile{Name: "Борис", MicOn: false, CamOn: true, Color: "#e74c3c"}
+	second, _ := connectTestPeer(t, wsURL, "profiles", webrtc.RTPCodecTypeAudio, false, secondProfile)
+	if got := second.profiles[first.id]; got != firstProfile {
+		t.Fatalf("joined profile = %+v, want %+v", got, firstProfile)
+	}
+	select {
+	case msg := <-first.events:
+		var data struct {
+			ID      string      `json:"id"`
+			Profile peerProfile `json:"profile"`
+		}
+		if msg.Type != "peer_joined" || json.Unmarshal(msg.Data, &data) != nil || data.ID != second.id || data.Profile != secondProfile {
+			t.Fatalf("peer_joined = %+v, data = %+v", msg, data)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first peer did not receive profile")
+	}
+	updated := peerProfile{Name: "Борис", MicOn: true, CamOn: false, ScreenShare: true, Color: "#e74c3c"}
+	data, _ := json.Marshal(updated)
+	if err := second.ws.WriteJSON(message{Type: "state", Data: data}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case msg := <-first.events:
+		var state struct {
+			ID      string      `json:"id"`
+			Profile peerProfile `json:"profile"`
+		}
+		if msg.Type != "state" || json.Unmarshal(msg.Data, &state) != nil || state.ID != second.id || state.Profile != updated {
+			t.Fatalf("state = %+v, data = %+v", msg, state)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first peer did not receive state update")
+	}
+}
+
+func TestTrickleICEConnection(t *testing.T) {
+	server := NewServer()
+	httpServer := httptest.NewServer(http.HandlerFunc(server.HandleWS))
+	defer httpServer.Close()
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http")
+
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	if _, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
+		Direction: webrtc.RTPTransceiverDirectionRecvonly,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	localCandidates := make(chan webrtc.ICECandidateInit, 32)
+	connected := make(chan struct{}, 1)
+	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+		if candidate != nil {
+			localCandidates <- candidate.ToJSON()
+		}
+	})
+	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		if state == webrtc.PeerConnectionStateConnected {
+			select {
+			case connected <- struct{}{}:
+			default:
+			}
+		}
+	})
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pc.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	data, _ := json.Marshal(pc.LocalDescription())
+	if err := ws.WriteJSON(message{Type: "join", Room: "trickle", Data: data}); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			select {
+			case candidate := <-localCandidates:
+				data, _ := json.Marshal(candidate)
+				if ws.WriteJSON(message{Type: "candidate", Data: data}) != nil {
+					return
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	events := make(chan message, 32)
+	go func() {
+		for {
+			var msg message
+			if ws.ReadJSON(&msg) != nil {
+				return
+			}
+			events <- msg
+		}
+	}()
+	var pending []webrtc.ICECandidateInit
+	answered := false
+	timeout := time.After(10 * time.Second)
+	for {
+		select {
+		case <-connected:
+			if !answered {
+				t.Fatal("ICE connected before answer")
+			}
+			return
+		case msg := <-events:
+			switch msg.Type {
+			case "joined":
+				var payload struct {
+					Answer webrtc.SessionDescription `json:"answer"`
+				}
+				if err := json.Unmarshal(msg.Data, &payload); err != nil {
+					t.Fatal(err)
+				}
+				if err := pc.SetRemoteDescription(payload.Answer); err != nil {
+					t.Fatal(err)
+				}
+				answered = true
+				for _, candidate := range pending {
+					if err := pc.AddICECandidate(candidate); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case "candidate":
+				var candidate webrtc.ICECandidateInit
+				if err := json.Unmarshal(msg.Data, &candidate); err != nil {
+					t.Fatal(err)
+				}
+				if answered {
+					if err := pc.AddICECandidate(candidate); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					pending = append(pending, candidate)
+				}
+			}
+		case <-timeout:
+			t.Fatalf("trickle ICE did not connect, state = %s", pc.ConnectionState())
+		}
+	}
+}
+
 func TestPublicICECandidate(t *testing.T) {
 	listener, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	if err != nil {
@@ -184,16 +414,25 @@ func TestPublicICECandidate(t *testing.T) {
 	peer, _ := connectTestPeer(t, wsURL, "ice", webrtc.RTPCodecTypeAudio, false)
 	publicCandidate := false
 	privateCandidate := false
-	for _, line := range strings.Split(peer.answer.SDP, "\n") {
+	checkCandidate := func(line string) {
 		if strings.Contains(line, "203.0.113.5 "+strconv.Itoa(int(port))) && strings.Contains(line, "typ host") {
 			publicCandidate = true
 		}
-		if strings.HasPrefix(line, "a=candidate:") && strings.Contains(line, "typ host") && !strings.Contains(line, "203.0.113.5 ") {
+		if strings.Contains(line, "candidate:") && strings.Contains(line, "typ host") && !strings.Contains(line, "203.0.113.5 ") {
 			privateCandidate = true
 		}
 	}
-	if !publicCandidate || !privateCandidate {
-		t.Fatalf("answer must advertise public and local host candidates: %s", peer.answer.SDP)
+	for _, line := range strings.Split(peer.answer.SDP, "\n") {
+		checkCandidate(line)
+	}
+	timeout := time.After(5 * time.Second)
+	for !publicCandidate || !privateCandidate {
+		select {
+		case candidate := <-peer.candidates:
+			checkCandidate(candidate.Candidate)
+		case <-timeout:
+			t.Fatalf("answer must advertise public and local host candidates: %s", peer.answer.SDP)
+		}
 	}
 }
 

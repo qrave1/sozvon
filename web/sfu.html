@@ -6,33 +6,73 @@
   <title>Sozvon SFU</title>
   <style>
     * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; font-family: system-ui, sans-serif; background: #14171b; color: #f1f3f5; }
-    header { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px; background: #242a30; }
-    input, button { min-height: 38px; border-radius: 5px; font: inherit; }
-    input { width: min(220px, 100%); padding: 7px 10px; border: 1px solid #57616a; background: #15191d; color: inherit; }
-    button { padding: 7px 12px; border: 0; background: #2879d0; color: white; cursor: pointer; }
-    button:disabled { opacity: .5; cursor: default; }
-    button[aria-pressed="true"] { background: #666; }
-    #status { margin-left: auto; font-size: 13px; }
-    main { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; padding: 12px; }
-    .tile { position: relative; min-height: 200px; aspect-ratio: 4 / 3; background: #000; border-radius: 6px; overflow: hidden; }
-    video { width: 100%; height: 100%; object-fit: contain; }
-    .avatar { display: grid; place-items: center; width: 100%; height: 100%; background: #35414b; color: white; font-size: 32px; }
     [hidden] { display: none !important; }
-    .label { position: absolute; left: 8px; bottom: 8px; padding: 3px 7px; background: #111b; font-size: 12px; border-radius: 3px; }
-    @media (max-width: 600px) { header { align-items: stretch; } #status { width: 100%; margin-left: 0; } }
+    body { margin: 0; height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; font-family: system-ui, -apple-system, sans-serif; background: #0f1115; color: #e6e6e6; }
+    header { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px 16px; background: #1a1d24; }
+    input, select, button { font: inherit; }
+    header input { width: min(190px, 100%); padding: 8px 10px; border: 1px solid #333; border-radius: 6px; background: #11131a; color: #fff; }
+    button { padding: 8px 12px; border: 0; border-radius: 6px; background: #2f6feb; color: #fff; cursor: pointer; font-size: 14px; }
+    button:disabled { opacity: .5; cursor: default; }
+    button[aria-pressed="true"] { background: #555; }
+    #leave { background: #c0392b; }
+    #status { margin-left: auto; font-size: 13px; opacity: .85; }
+    .device-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 16px; background: #15181e; border-bottom: 1px solid #292d35; }
+    .device-bar label { display: flex; align-items: center; gap: 5px; font-size: 12px; }
+    .device-bar select { max-width: 170px; padding: 5px 8px; border: 1px solid #333; border-radius: 6px; background: #11131a; color: #fff; }
+    .device-bar select:disabled { opacity: .5; }
+    #videos { --pad: 16px; --gap: 10px; --strip: 200px; flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); grid-auto-rows: minmax(180px, 1fr); gap: var(--gap); padding: var(--pad); overflow: auto; }
+    #videos.spotlight { position: relative; grid-template-columns: 1fr var(--strip); grid-auto-rows: min-content; overflow: hidden; }
+    #videos.spotlight .tile.active-lg { position: absolute; inset: var(--pad) calc(var(--pad) + var(--strip) + var(--gap)) var(--pad) var(--pad); width: auto; height: auto; z-index: 1; }
+    #videos.spotlight .tile:not(.active-lg) { grid-column: 2; min-height: 0; max-height: 130px; aspect-ratio: 4 / 3; }
+    #videos.spotlight .tile:not(.active-lg) video { object-fit: cover; }
+    .tile { position: relative; min-height: 180px; background: #000; border-radius: 8px; overflow: hidden; cursor: pointer; }
+    .tile video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+    .tile:fullscreen { border-radius: 0; }
+    .tile.speaking { box-shadow: inset 0 0 0 3px #2ecc71; }
+    .tile .avatar { position: absolute; inset: 0; display: grid; place-items: center; color: #fff; font-size: 48px; font-weight: 700; }
+    .tile .label { position: absolute; bottom: 6px; left: 8px; max-width: calc(100% - 65px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 2px 8px; border-radius: 4px; background: rgba(0, 0, 0, .65); font-size: 12px; }
+    .tile .badge { position: absolute; top: 6px; right: 8px; padding: 2px 8px; border-radius: 4px; background: rgba(0, 0, 0, .65); font-size: 11px; }
+    .tile .peer-mute, .tile .peer-fullscreen { position: absolute; z-index: 2; padding: 2px 7px; border-radius: 4px; background: rgba(0, 0, 0, .65); font-size: 12px; }
+    .tile .peer-mute { top: 6px; left: 8px; }
+    .tile .peer-fullscreen { bottom: 6px; right: 8px; }
+    @media (max-width: 600px) {
+      header { padding: 8px; }
+      header input { flex: 1 1 120px; width: 0; }
+      #status { width: 100%; margin-left: 0; }
+      #videos { --pad: 8px; --gap: 8px; --strip: 120px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+      .device-bar { padding: 8px; }
+    }
   </style>
 </head>
 <body>
   <header>
-    <input id="room" aria-label="Комната" placeholder="Комната">
+    <input id="name" aria-label="Ваше имя" placeholder="Ваше имя" maxlength="64">
+    <input id="room" aria-label="ID комнаты" placeholder="ID комнаты" maxlength="128">
     <button id="join">Войти</button>
-    <button id="leave" disabled>Выйти</button>
-    <button id="mic" disabled aria-pressed="false" title="Микрофон">🎤</button>
-    <button id="cam" disabled aria-pressed="false" title="Камера">📹</button>
-    <button id="screen" disabled aria-pressed="false" title="Экран">🖥️</button>
+    <button id="leave" hidden>Выйти</button>
+    <button id="mic" aria-pressed="false" title="Микрофон" aria-label="Переключить микрофон">🎤</button>
+    <button id="cam" aria-pressed="true" title="Камера" aria-label="Переключить камеру">📹</button>
+    <button id="screen" hidden title="Демонстрация экрана" aria-label="Демонстрация экрана">🖥</button>
+    <button id="share" hidden title="Скопировать ссылку" aria-label="Скопировать ссылку">🔗</button>
+    <button id="settings" aria-pressed="false" title="Настройки устройств" aria-label="Настройки устройств">⚙</button>
     <span id="status" role="status" aria-live="polite">Не подключено</span>
   </header>
+  <div id="device-bar" class="device-bar" hidden>
+    <label>🎤 <select id="audio-input" aria-label="Микрофон"></select></label>
+    <label>🔊 <select id="audio-output" aria-label="Аудиовыход" title="Доступно не во всех браузерах"></select></label>
+    <label>📷 <select id="video-input" aria-label="Камера"></select></label>
+    <label>🎨 <select id="color" aria-label="Цвет аватара">
+      <option value="">Авто</option>
+      <option value="#e74c3c">Красный</option><option value="#3498db">Синий</option>
+      <option value="#2ecc71">Зелёный</option><option value="#9b59b6">Фиолетовый</option>
+      <option value="#f1c40f">Жёлтый</option><option value="#1abc9c">Бирюзовый</option>
+      <option value="#e67e22">Оранжевый</option><option value="#34495e">Тёмно-серый</option>
+      <option value="#fd79a8">Розовый</option><option value="#00cec9">Аква</option>
+    </select></label>
+    <label>📶 <select id="bitrate" aria-label="Качество видео">
+      <option value="low">Низкое</option><option value="medium">Среднее</option><option value="high">Высокое</option>
+    </select></label>
+  </div>
   <main id="videos"></main>
   <script src="/sfu.js"></script>
 </body>

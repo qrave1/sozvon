@@ -27,9 +27,44 @@ const (
 )
 
 type message struct {
-	Type string          `json:"type"`
-	Room string          `json:"room,omitempty"`
-	Data json.RawMessage `json:"data,omitempty"`
+	Type    string          `json:"type"`
+	Room    string          `json:"room,omitempty"`
+	Data    json.RawMessage `json:"data,omitempty"`
+	Profile json.RawMessage `json:"profile,omitempty"`
+}
+
+type peerProfile struct {
+	Name        string `json:"name"`
+	MicOn       bool   `json:"micOn"`
+	CamOn       bool   `json:"camOn"`
+	ScreenShare bool   `json:"screenShare"`
+	Color       string `json:"color"`
+}
+
+func parseProfile(raw json.RawMessage) peerProfile {
+	if len(raw) == 0 {
+		return peerProfile{MicOn: true, CamOn: true}
+	}
+	var profile peerProfile
+	if json.Unmarshal(raw, &profile) != nil {
+		return peerProfile{}
+	}
+	name := []rune(strings.TrimSpace(profile.Name))
+	if len(name) > 64 {
+		name = name[:64]
+	}
+	profile.Name = string(name)
+	if len(profile.Color) != 7 || profile.Color[0] != '#' {
+		profile.Color = ""
+	} else {
+		for _, c := range profile.Color[1:] {
+			if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
+				profile.Color = ""
+				break
+			}
+		}
+	}
+	return profile
 }
 
 type publication struct {
@@ -132,13 +167,14 @@ func (s *Server) removeEmptyRoom(r *room) {
 }
 
 type peer struct {
-	id   string
-	room *room
-	pc   *webrtc.PeerConnection
-	ws   *websocket.Conn
-	send chan message
-	done chan struct{}
-	once sync.Once
+	id      string
+	room    *room
+	profile peerProfile
+	pc      *webrtc.PeerConnection
+	ws      *websocket.Conn
+	send    chan message
+	done    chan struct{}
+	once    sync.Once
 
 	negMu         sync.Mutex
 	ready         bool
@@ -190,13 +226,19 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 
 	p := &peer{
 		id: uuid.NewString(), pc: pc, ws: ws,
-		send: make(chan message, 256), done: make(chan struct{}),
+		profile: parseProfile(first.Profile),
+		send:    make(chan message, 256), done: make(chan struct{}),
 		subscriptions: make(map[string]*webrtc.RTPSender),
 	}
 	s.addPeer(first.Room, p)
 
 	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		p.publish(track)
+	})
+	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+		if candidate != nil {
+			p.sendMessage("candidate", candidate.ToJSON())
+		}
 	})
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		if state == webrtc.PeerConnectionStateFailed {
@@ -236,6 +278,16 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
+		case "candidate":
+			var candidate webrtc.ICECandidateInit
+			if err := json.Unmarshal(msg.Data, &candidate); err != nil || candidate.Candidate == "" {
+				break
+			}
+			if err := p.pc.AddICECandidate(candidate); err != nil {
+				slog.Warn("sfu ICE candidate rejected", "peer", p.id, "error", err)
+			}
+		case "state":
+			p.updateProfile(parseProfile(msg.Data))
 		}
 	}
 	p.close(s)
@@ -305,11 +357,9 @@ func (p *peer) acceptOffer(offer webrtc.SessionDescription) error {
 	if err != nil {
 		return err
 	}
-	gatherComplete := webrtc.GatheringCompletePromise(p.pc)
 	if err := p.pc.SetLocalDescription(answer); err != nil {
 		return err
 	}
-	<-gatherComplete
 	p.ready = true
 	p.dirty = false
 	p.requestKeyframes()
@@ -321,17 +371,37 @@ func (p *peer) announce() {
 	r.mu.Lock()
 	peers := make([]*peer, 0, len(r.peers))
 	ids := make([]string, 0, len(r.peers))
+	profiles := make(map[string]peerProfile)
 	for _, other := range r.peers {
 		if other != p && other.announced {
 			peers = append(peers, other)
 			ids = append(ids, other.id)
+			profiles[other.id] = other.profile
 		}
 	}
 	p.announced = true
-	p.sendMessage("joined", map[string]any{"id": p.id, "answer": p.pc.LocalDescription(), "peers": ids})
+	p.sendMessage("joined", map[string]any{"id": p.id, "answer": p.pc.LocalDescription(), "peers": ids, "profiles": profiles})
 	r.mu.Unlock()
 	for _, other := range peers {
-		other.sendMessage("peer_joined", map[string]any{"id": p.id})
+		other.sendMessage("peer_joined", map[string]any{"id": p.id, "profile": p.profile})
+	}
+}
+
+func (p *peer) updateProfile(profile peerProfile) {
+	r := p.room
+	r.mu.Lock()
+	p.profile = profile
+	peers := make([]*peer, 0, len(r.peers))
+	if p.announced {
+		for _, other := range r.peers {
+			if other != p && other.announced {
+				peers = append(peers, other)
+			}
+		}
+	}
+	r.mu.Unlock()
+	for _, other := range peers {
+		other.sendMessage("state", map[string]any{"id": p.id, "profile": profile})
 	}
 }
 
@@ -403,11 +473,9 @@ func (p *peer) sendOfferLocked() error {
 	if err != nil {
 		return err
 	}
-	gatherComplete := webrtc.GatheringCompletePromise(p.pc)
 	if err := p.pc.SetLocalDescription(offer); err != nil {
 		return err
 	}
-	<-gatherComplete
 	p.dirty = false
 	p.sendMessage("offer", p.pc.LocalDescription())
 	return nil
