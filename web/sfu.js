@@ -31,6 +31,8 @@
   let audioContext = null;
   let speakingTimer = null;
   let noticeTimer = null;
+  let bitrateUpdate = Promise.resolve();
+  let videoDeviceUpdate = Promise.resolve();
   const remoteStreams = new Map();
   const profiles = new Map();
   const mutedPeers = new Set();
@@ -302,14 +304,24 @@
     return media;
   }
 
+  function videoSender() {
+    return pc?.getSenders().find((item) => item.track?.kind === "video") ||
+      pc?.getTransceivers().find((transceiver) => transceiver.receiver?.track?.kind === "video")?.sender;
+  }
+
   function applyBitrate() {
-    const sender = pc?.getSenders().find((item) => item.track?.kind === "video");
-    if (!sender) return;
-    const params = sender.getParameters();
-    if (!params.encodings?.length) params.encodings = [{}];
-    const preset = BITRATES[el.bitrate.value] || BITRATES.medium;
-    for (const encoding of params.encodings) encoding.maxBitrate = screenStream ? preset.screen : preset.cam;
-    sender.setParameters(params).catch(() => {});
+    const connection = pc;
+    const sender = videoSender();
+    if (!connection || !sender?.track) return Promise.resolve();
+    bitrateUpdate = bitrateUpdate.catch(() => {}).then(async () => {
+      if (pc !== connection || sender.track?.kind !== "video") return;
+      const params = sender.getParameters();
+      if (!params.encodings?.length) return;
+      const preset = BITRATES[el.bitrate.value] || BITRATES.medium;
+      for (const encoding of params.encodings) encoding.maxBitrate = screenStream ? preset.screen : preset.cam;
+      await sender.setParameters(params);
+    });
+    return bitrateUpdate;
   }
 
   async function openWebSocket(url) {
@@ -404,8 +416,8 @@
       for (const track of localStream.getTracks()) pc.addTrack(track, localStream);
       if (!localStream.getAudioTracks().length) pc.addTransceiver("audio", { direction: "sendrecv" });
       if (!cameraTrack) pc.addTransceiver("video", { direction: "sendrecv" });
-      applyBitrate();
       await pc.setLocalDescription(await pc.createOffer());
+      await applyBitrate().catch((error) => console.warn("initial bitrate update failed", error));
       if (token !== attempt) return;
       const proto = location.protocol === "https:" ? "wss" : "ws";
       status("Подключение к комнате...");
@@ -475,7 +487,7 @@
     stopAnalysis("local");
     analyzeAudio("local", localStream);
     renderTile("local");
-    applyBitrate();
+    await applyBitrate().catch((error) => console.warn("bitrate update failed after track replacement", error));
   }
 
   function broadcastState() {
@@ -514,7 +526,7 @@
   }
 
   async function toggleScreen() {
-    const sender = pc?.getTransceivers().find((tr) => tr.receiver?.track?.kind === "video")?.sender;
+    const sender = videoSender();
     if (!sender) return;
     if (screenStream) {
       await sender.replaceTrack(cameraTrack);
@@ -531,7 +543,7 @@
     }
     renderTile("local");
     updateControls();
-    applyBitrate();
+    await applyBitrate().catch((error) => console.warn("bitrate update failed after screen share change", error));
     broadcastState();
   }
 
@@ -540,12 +552,90 @@
     if (kind === "audiooutput") { applyAudioOutput(); return; }
     if (!joined) return;
     if (kind === "video" && screenStream) { notify("Остановите демонстрацию экрана"); return; }
+    if (kind === "video") {
+      const deviceId = el["video-input"].value;
+      videoDeviceUpdate = videoDeviceUpdate.catch(() => {}).then(() => changeVideoDevice(deviceId)).catch((error) => {
+        console.warn("camera switch failed", error);
+        notify("Не удалось переключить камеру");
+      });
+      return videoDeviceUpdate;
+    }
     try {
       const track = await acquireTrack(kind);
       track.enabled = kind === "audio" ? micOn : camOn;
       await replaceLocalTrack(kind, track);
       broadcastState();
     } catch (error) { console.warn("device change failed", error); notify("Устройство недоступно"); }
+  }
+
+  async function changeVideoDevice(deviceId) {
+    if (!joined || !pc || screenStream) return;
+    const sender = videoSender();
+    const previousTrack = cameraTrack;
+    const previousDeviceId = previousTrack?.getSettings().deviceId || "";
+    const previousEnabled = previousTrack?.enabled ?? camOn;
+    const isMobile = navigator.userAgentData?.mobile || /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    const acquireVideo = async (id) => {
+      const constraints = id ? { deviceId: { exact: id } } : true;
+      const stream = await navigator.mediaDevices.getUserMedia({ video: constraints });
+      const track = stream.getVideoTracks()[0];
+      if (!track) {
+        stream.getTracks().forEach((item) => item.stop());
+        throw new Error("Камера не вернула видеотрек");
+      }
+      return track;
+    };
+    const releasePrevious = async () => {
+      await sender.replaceTrack(null);
+      localStream?.removeTrack(previousTrack);
+      previousTrack.stop();
+      cameraTrack = null;
+    };
+    const restorePrevious = async () => {
+      const restored = await acquireVideo(previousDeviceId);
+      restored.enabled = previousEnabled;
+      await sender.replaceTrack(restored);
+      localStream ||= new MediaStream();
+      localStream.addTrack(restored);
+      cameraTrack = restored;
+      renderTile("local");
+      await applyBitrate().catch((error) => console.warn("bitrate update failed after camera restore", error));
+    };
+
+    let track;
+    let releasedPrevious = false;
+    try {
+      if (isMobile && previousTrack && sender) {
+        await releasePrevious();
+        releasedPrevious = true;
+      }
+      track = await acquireVideo(deviceId);
+    } catch (firstError) {
+      if (!previousTrack || !sender) throw firstError;
+      if (!releasedPrevious) {
+        await releasePrevious();
+        releasedPrevious = true;
+        try {
+          track = await acquireVideo(deviceId);
+        } catch (switchError) {
+          firstError = switchError;
+        }
+      }
+      if (!track && releasedPrevious) {
+        try { await restorePrevious(); }
+        catch (restoreError) { console.warn("camera restore failed", restoreError); }
+        if ([...el["video-input"].options].some((option) => option.value === previousDeviceId)) {
+          el["video-input"].value = previousDeviceId;
+          savePrefs();
+        }
+        throw firstError;
+      }
+    }
+
+    track.enabled = camOn;
+    await replaceLocalTrack("video", track);
+    savePrefs();
+    broadcastState();
   }
 
   async function share() {
@@ -587,7 +677,14 @@
   el.name.addEventListener("input", () => { savePrefs(); if (document.getElementById("tile-local")) renderTile("local"); });
   el.room.addEventListener("input", savePrefs);
   el.color.onchange = () => { savePrefs(); if (joined) { renderTile("local"); broadcastState(); } };
-  el.bitrate.onchange = () => { savePrefs(); applyBitrate(); };
+  el.bitrate.onchange = () => {
+    savePrefs();
+    if (!joined) return;
+    applyBitrate().then(() => notify("Качество видео обновлено", 1800)).catch((error) => {
+      console.warn("bitrate update failed", error);
+      notify("Не удалось применить качество видео");
+    });
+  };
   el["audio-input"].onchange = () => changeDevice("audio");
   el["audio-output"].onchange = () => changeDevice("audiooutput");
   el["video-input"].onchange = () => changeDevice("video");
