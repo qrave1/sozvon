@@ -46,11 +46,22 @@
     .tile .peer-mute { top: 6px; left: 8px; }
     .tile .peer-fullscreen { bottom: 6px; right: 8px; }
     @media (max-width: 600px) {
-      header { padding: 8px; }
+      header { padding: 8px; gap: 6px; }
+      header > div:first-child, header > div:nth-child(2), header > div:nth-child(3) { width: 100%; }
+      header > div:nth-child(3) { justify-content: stretch; }
+      header > div:nth-child(3) button { flex: 1; min-width: 0; padding-inline: 8px; }
       header input { flex: 1 1 120px; width: 0; }
-      #status { width: 100%; margin-left: 0; }
-      #videos { --pad: 8px; --gap: 8px; --strip: 120px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
-      .device-bar { padding: 8px; }
+      #status { width: 100%; margin-left: 0; text-align: center; }
+      #videos { --pad: 8px; --gap: 8px; --strip: 112px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); grid-auto-rows: minmax(140px, 1fr); }
+      .tile { min-height: 140px; border-radius: 12px; }
+      .tile .label { left: 5px; bottom: 5px; max-width: calc(100% - 10px); font-size: 11px; }
+      .tile .peer-mute, .tile .peer-fullscreen { opacity: 1; }
+      .device-bar { padding: 8px; gap: 7px; }
+      .device-bar label { width: 100%; justify-content: space-between; }
+      .device-bar select { flex: 1; max-width: none; }
+    }
+    @media (min-width: 601px) and (max-width: 900px) {
+      #videos { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
     }
   </style>
 </head>
