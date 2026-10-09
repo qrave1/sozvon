@@ -9,7 +9,7 @@
     high: { cam: 8000000, screen: 16000000 },
   };
   const el = Object.fromEntries([
-    "name", "room", "join", "leave", "welcome", "mic", "cam", "screen", "share", "settings", "status",
+    "name", "room", "join", "leave", "welcome", "mic", "cam", "screen", "share", "chat-toggle", "settings", "status",
     "device-bar", "settings-close", "audio-input", "audio-output", "video-input", "color", "bitrate", "videos", "toast",
     "room-content", "room-tabs", "video-tab", "chat-tab", "chat-panel", "chat-messages", "chat-form", "chat-input",
   ].map((id) => [id, document.getElementById(id)]));
@@ -113,6 +113,7 @@
     el.welcome.hidden = joined || busy;
     el["room-content"].hidden = !joined;
     el["room-tabs"].hidden = !joined;
+    el["chat-toggle"].hidden = !joined;
     el.join.hidden = joined;
     el.join.disabled = busy;
     el.leave.hidden = !joined && !busy;
@@ -480,6 +481,14 @@
     if (chatActive) el["chat-input"].focus();
   }
 
+  function toggleChat() {
+    const chatOpen = !el["room-content"].classList.contains("chat-open");
+    el["room-content"].classList.toggle("chat-open", chatOpen);
+    el["chat-toggle"].setAttribute("aria-expanded", String(chatOpen));
+    el["chat-toggle"].textContent = chatOpen ? "✕ Скрыть чат" : "💬 Чат";
+    if (chatOpen) el["chat-input"].focus();
+  }
+
   async function join() {
     const room = el.room.value.trim();
     if (!room || pc || busy) { if (!room) notify("Введите ID комнаты"); return; }
@@ -566,6 +575,9 @@
     busy = false;
     joined = false;
     localPeerID = "";
+    el["room-content"].classList.remove("chat-open");
+    el["chat-toggle"].setAttribute("aria-expanded", "false");
+    el["chat-toggle"].textContent = "💬 Чат";
     clearTimeout(noticeTimer);
     if (ws) { ws.onclose = null; ws.close(); ws = null; }
     if (pc) { pc.close(); pc = null; }
@@ -830,6 +842,7 @@
   el["video-input"].dataset.preferred = prefs.videoId || "";
   el.join.onclick = join;
   el.leave.onclick = () => leave();
+  el["chat-toggle"].onclick = toggleChat;
   el["chat-form"].addEventListener("submit", sendChatMessage);
   el["video-tab"].onclick = () => setRoomTab("video");
   el["chat-tab"].onclick = () => setRoomTab("chat");
