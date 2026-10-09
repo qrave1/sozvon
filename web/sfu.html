@@ -83,8 +83,8 @@
     </div>
     <span id="status" class="rounded-full border border-line bg-slate-900/70 px-3 py-1 text-xs font-medium text-slate-300" role="status" aria-live="polite">Не подключено</span>
   </header>
-  <div id="device-bar" class="device-bar shadow-inner" hidden>
-    <div class="mr-2 w-full text-xs font-semibold uppercase tracking-wider text-slate-400 sm:w-auto">Настройки комнаты</div>
+  <div id="device-bar" class="device-bar shadow-inner" role="dialog" aria-modal="false" aria-labelledby="settings-title" hidden>
+    <div class="flex w-full items-center justify-between"><div id="settings-title" class="text-xs font-semibold uppercase tracking-wider text-slate-400">Настройки комнаты</div><button id="settings-close" class="rounded-lg px-2 py-1 text-slate-300 hover:bg-slate-700" aria-label="Закрыть настройки">✕</button></div>
     <label class="flex items-center gap-2">🎤 <select class="min-w-40" id="audio-input" aria-label="Микрофон"></select></label>
     <label class="flex items-center gap-2">🔊 <select class="min-w-40" id="audio-output" aria-label="Аудиовыход" title="Доступно не во всех браузерах"></select></label>
     <label class="flex items-center gap-2">📷 <select class="min-w-40" id="video-input" aria-label="Камера"></select></label>
@@ -101,6 +101,7 @@
     </select></label>
   </div>
   <main id="videos" aria-label="Участники комнаты"></main>
+  <div id="toast" class="pointer-events-none fixed bottom-14 left-1/2 z-20 hidden -translate-x-1/2 rounded-xl border border-line bg-slate-900/95 px-4 py-3 text-sm text-white shadow-xl" role="alert" aria-live="assertive"></div>
   <footer class="border-t border-line bg-panel px-4 py-2 text-center text-xs text-slate-400">Нажмите на видео, чтобы открыть режим фокуса · звук участников воспроизводится отдельно</footer>
   <script src="/sfu.js"></script>
 </body>

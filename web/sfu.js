@@ -10,7 +10,7 @@
   };
   const el = Object.fromEntries([
     "name", "room", "join", "leave", "mic", "cam", "screen", "share", "settings", "status",
-    "device-bar", "audio-input", "audio-output", "video-input", "color", "bitrate", "videos",
+    "device-bar", "settings-close", "audio-input", "audio-output", "video-input", "color", "bitrate", "videos", "toast",
   ].map((id) => [id, document.getElementById(id)]));
 
   let pc = null;
@@ -81,7 +81,13 @@
   function notify(text, duration = 3000) {
     clearTimeout(noticeTimer);
     status(text);
+    if (el.toast) {
+      el.toast.textContent = text;
+      el.toast.hidden = false;
+      el.toast.classList.remove("hidden");
+    }
     noticeTimer = setTimeout(() => {
+      if (el.toast) { el.toast.hidden = true; el.toast.classList.add("hidden"); }
       if (el.status.textContent === text) status(joined ? `В комнате: ${el.room.value}` : "Не подключено");
     }, duration);
   }
@@ -741,6 +747,10 @@
   el.settings.onclick = () => {
     el["device-bar"].hidden = !el["device-bar"].hidden;
     el.settings.setAttribute("aria-pressed", String(!el["device-bar"].hidden));
+  };
+  el["settings-close"].onclick = () => {
+    el["device-bar"].hidden = true;
+    el.settings.setAttribute("aria-pressed", "false");
   };
   el.name.addEventListener("input", () => { savePrefs(); if (document.getElementById("tile-local")) renderTile("local"); });
   el.room.addEventListener("input", savePrefs);
