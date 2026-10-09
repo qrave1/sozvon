@@ -30,6 +30,7 @@ type testPeer struct {
 	peers      []string
 	profiles   map[string]peerProfile
 	readDone   chan struct{}
+	tracks     chan *webrtc.TrackRemote
 }
 
 func connectTestPeer(t *testing.T, wsURL, roomID string, kind webrtc.RTPCodecType, publish bool, profile ...peerProfile) (*testPeer, *webrtc.TrackLocalStaticRTP) {
@@ -47,6 +48,7 @@ func connectTestPeerWithKinds(t *testing.T, wsURL, roomID string, kind webrtc.RT
 		pc: pc, packets: make(chan *rtp.Packet, 1), events: make(chan message, 8),
 		candidates: make(chan webrtc.ICECandidateInit, 32), send: make(chan message, 64),
 		done: make(chan struct{}), readDone: make(chan struct{}),
+		tracks: make(chan *webrtc.TrackRemote, 32),
 	}
 	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate == nil {
@@ -59,9 +61,24 @@ func connectTestPeerWithKinds(t *testing.T, wsURL, roomID string, kind webrtc.RT
 		}
 	})
 	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
-		packet, _, err := track.ReadRTP()
-		if err == nil {
-			p.packets <- packet
+		first := true
+		for {
+			packet, _, err := track.ReadRTP()
+			if err != nil {
+				return
+			}
+			if first {
+				select {
+				case p.tracks <- track:
+				case <-p.done:
+					return
+				}
+				first = false
+			}
+			select {
+			case p.packets <- packet:
+			default:
+			}
 		}
 	})
 	var outgoing *webrtc.TrackLocalStaticRTP
@@ -87,7 +104,19 @@ func connectTestPeerWithKinds(t *testing.T, wsURL, roomID string, kind webrtc.RT
 		t.Fatal(err)
 	}
 	for _, extraKind := range extraKinds {
-		if _, err := pc.AddTransceiverFromKind(extraKind, webrtc.RTPTransceiverInit{
+		if publish {
+			codec := webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000}
+			if extraKind == webrtc.RTPCodecTypeAudio {
+				codec = webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2}
+			}
+			track, err := webrtc.NewTrackLocalStaticRTP(codec, extraKind.String(), "local")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pc.AddTrack(track); err != nil {
+				t.Fatal(err)
+			}
+		} else if _, err := pc.AddTransceiverFromKind(extraKind, webrtc.RTPTransceiverInit{
 			Direction: webrtc.RTPTransceiverDirectionRecvonly,
 		}); err != nil {
 			t.Fatal(err)
@@ -556,12 +585,11 @@ func TestLateSubscriber(t *testing.T) {
 	}
 
 	subscriber, _ := connectTestPeerWithKinds(t, wsURL, "late", webrtc.RTPCodecTypeAudio, false, []webrtc.RTPCodecType{webrtc.RTPCodecTypeVideo})
-	for range 2 {
+	seen := make(map[webrtc.RTPCodecType]bool)
+	for len(seen) != 2 {
 		select {
-		case packet := <-subscriber.packets:
-			if len(packet.Payload) == 0 {
-				t.Fatal("late subscriber received empty RTP packet")
-			}
+		case track := <-subscriber.tracks:
+			seen[track.Kind()] = true
 		case <-time.After(8 * time.Second):
 			t.Fatal("late subscriber did not receive every existing RTP track")
 		}

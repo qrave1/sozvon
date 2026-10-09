@@ -286,6 +286,8 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 			}
 		case "state":
 			p.updateProfile(parseProfile(msg.Data))
+		case "refresh_video":
+			p.requestPublishedKeyframes()
 		}
 	}
 	p.close(s)
@@ -342,19 +344,8 @@ func (p *peer) acceptOffer(offer webrtc.SessionDescription) error {
 	if err := p.pc.SetRemoteDescription(offer); err != nil {
 		return err
 	}
-	p.room.mu.RLock()
-	publications := make([]*publication, 0, len(p.room.publications))
-	for _, pub := range p.room.publications {
-		if pub.owner != p {
-			publications = append(publications, pub)
-		}
-	}
-	p.room.mu.RUnlock()
-	for _, pub := range publications {
-		if err := p.addSubscriptionLocked(pub); err != nil {
-			return err
-		}
-	}
+	// An answer cannot add media sections absent from the client's offer.
+	// All subscriptions are negotiated in a server offer after joined.
 	answer, err := p.pc.CreateAnswer(nil)
 	if err != nil {
 		return err
@@ -362,7 +353,6 @@ func (p *peer) acceptOffer(offer webrtc.SessionDescription) error {
 	if err := p.pc.SetLocalDescription(answer); err != nil {
 		return err
 	}
-	p.requestKeyframes()
 	return nil
 }
 
@@ -416,6 +406,7 @@ func (p *peer) announce() {
 func (p *peer) updateProfile(profile peerProfile) {
 	r := p.room
 	r.mu.Lock()
+	refreshVideo := (profile.CamOn && !p.profile.CamOn) || profile.ScreenShare != p.profile.ScreenShare
 	p.profile = profile
 	peers := make([]*peer, 0, len(r.peers))
 	if p.announced {
@@ -428,6 +419,23 @@ func (p *peer) updateProfile(profile peerProfile) {
 	r.mu.Unlock()
 	for _, other := range peers {
 		other.sendMessage("state", map[string]any{"id": p.id, "profile": profile})
+	}
+	if refreshVideo {
+		p.requestPublishedKeyframes()
+	}
+}
+
+func (p *peer) requestPublishedKeyframes() {
+	p.room.mu.RLock()
+	publications := make([]*publication, 0)
+	for _, pub := range p.room.publications {
+		if pub.owner == p {
+			publications = append(publications, pub)
+		}
+	}
+	p.room.mu.RUnlock()
+	for _, pub := range publications {
+		pub.requestKeyframe(0)
 	}
 }
 
@@ -445,16 +453,37 @@ func (p *peer) addSubscriptionLocked(pub *publication) error {
 	if _, exists := p.subscriptions[pub.id]; exists {
 		return nil
 	}
-	sender, err := p.pc.AddTrack(pub.local)
+	select {
+	case <-p.done:
+		return nil
+	default:
+	}
+	p.room.mu.RLock()
+	defer p.room.mu.RUnlock()
+	if p.room.publications[pub.id] != pub {
+		return nil
+	}
+	transceiver, err := p.pc.AddTransceiverFromTrack(pub.local, webrtc.RTPTransceiverInit{
+		Direction: webrtc.RTPTransceiverDirectionSendonly,
+	})
 	if err != nil {
 		return err
 	}
+	sender := transceiver.Sender()
 	p.subscriptions[pub.id] = sender
 	go func() {
-		buf := make([]byte, 1500)
 		for {
-			if _, _, err := sender.Read(buf); err != nil {
+			packets, _, err := sender.ReadRTCP()
+			if err != nil {
 				return
+			}
+			for _, packet := range packets {
+				switch feedback := packet.(type) {
+				case *rtcp.PictureLossIndication:
+					pub.requestKeyframe(feedback.SenderSSRC)
+				case *rtcp.FullIntraRequest:
+					pub.requestKeyframe(feedback.SenderSSRC)
+				}
 			}
 		}
 	}()
@@ -464,6 +493,10 @@ func (p *peer) addSubscriptionLocked(pub *publication) error {
 func (p *peer) addSubscription(pub *publication) {
 	p.negMu.Lock()
 	defer p.negMu.Unlock()
+	if !p.ready {
+		p.dirty = true
+		return
+	}
 	if _, exists := p.subscriptions[pub.id]; exists {
 		return
 	}
@@ -520,10 +553,17 @@ func (p *peer) requestKeyframes() {
 	}
 	p.room.mu.RUnlock()
 	for _, pub := range publications {
-		_ = pub.owner.pc.WriteRTCP([]rtcp.Packet{
-			&rtcp.PictureLossIndication{MediaSSRC: uint32(pub.remote.SSRC())},
-		})
+		pub.requestKeyframe(0)
 	}
+}
+
+func (pub *publication) requestKeyframe(senderSSRC uint32) {
+	if pub.remote.Kind() != webrtc.RTPCodecTypeVideo {
+		return
+	}
+	_ = pub.owner.pc.WriteRTCP([]rtcp.Packet{
+		&rtcp.PictureLossIndication{SenderSSRC: senderSSRC, MediaSSRC: uint32(pub.remote.SSRC())},
+	})
 }
 
 func (p *peer) publish(track *webrtc.TrackRemote) {
@@ -535,6 +575,10 @@ func (p *peer) publish(track *webrtc.TrackRemote) {
 	pub := &publication{id: p.id + ":" + track.ID(), owner: p, remote: track, local: local}
 	r := p.room
 	r.mu.Lock()
+	if r.peers[p.id] != p {
+		r.mu.Unlock()
+		return
+	}
 	r.publications[pub.id] = pub
 	peers := make([]*peer, 0, len(r.peers))
 	for _, other := range r.peers {
@@ -555,6 +599,11 @@ func (p *peer) publish(track *webrtc.TrackRemote) {
 			}
 			return
 		}
+		// MID, RID and transport sequence extensions belong to the inbound
+		// connection. Pion's outbound interceptors generate their own extensions.
+		packet.Header.Extension = false
+		packet.Header.ExtensionProfile = 0
+		packet.Header.Extensions = nil
 		if err := local.WriteRTP(packet); err != nil {
 			slog.Debug("sfu RTP write failed", "peer", p.id, "error", err)
 		}

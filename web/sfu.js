@@ -33,6 +33,7 @@
   let noticeTimer = null;
   let bitrateUpdate = Promise.resolve();
   let videoDeviceUpdate = Promise.resolve();
+  const localSenders = { audio: null, video: null };
   const remoteStreams = new Map();
   const profiles = new Map();
   const mutedPeers = new Set();
@@ -112,6 +113,8 @@
       const video = document.createElement("video");
       video.autoplay = true;
       video.playsInline = true;
+      const audio = document.createElement("audio");
+      audio.autoplay = true;
       const avatar = document.createElement("div");
       avatar.className = "avatar";
       const label = document.createElement("div");
@@ -140,7 +143,7 @@
         el.videos.classList.toggle("spotlight", !!activeId);
         for (const item of el.videos.children) item.classList.toggle("active-lg", item.id === `tile-${activeId}`);
       };
-      tile.append(video, avatar, mute, badge, fullscreen, label);
+      tile.append(video, audio, avatar, mute, badge, fullscreen, label);
       el.videos.append(tile);
     }
 
@@ -148,13 +151,18 @@
     const info = own ? profile() : normalizeProfile(profiles.get(id));
     const stream = own ? (screenStream || localStream) : remoteStreams.get(id);
     const video = tile.querySelector("video");
+    const audio = tile.querySelector("audio");
     const hasVideo = !!stream?.getVideoTracks().length && (info.camOn || info.screenShare);
-    video.muted = own || mutedPeers.has(id);
+    video.muted = true;
+    audio.muted = own || mutedPeers.has(id);
     if (video.srcObject !== stream) {
       video.srcObject = stream || null;
       if (stream) video.play().catch(() => {});
     }
-    if (!own && el["audio-output"].value) video.setSinkId?.(el["audio-output"].value).catch(() => {});
+    const audioStream = !own && stream?.getAudioTracks().length ? stream : null;
+    if (audio.srcObject !== audioStream) audio.srcObject = audioStream;
+    if (audioStream) audio.play().catch(() => {});
+    if (!own && el["audio-output"].value) audio.setSinkId?.(el["audio-output"].value).catch(() => {});
     video.hidden = !hasVideo;
     const avatar = tile.querySelector(".avatar");
     avatar.hidden = hasVideo;
@@ -215,24 +223,27 @@
   }
 
   function onTrack(event) {
-    const id = event.streams[0]?.id;
+    const stream = event.streams[0];
+    const id = stream?.id;
     if (!id) return;
-    let stream = remoteStreams.get(id);
-    if (!stream) {
-      stream = new MediaStream();
-      remoteStreams.set(id, stream);
-    }
-    if (!stream.getTracks().includes(event.track)) stream.addTrack(event.track);
-    renderTile(id);
-    analyzeAudio(id, stream);
-    event.track.onended = () => {
-      stream.removeTrack(event.track);
-      if (!stream.getTracks().length) {
-        remoteStreams.delete(id);
-        stopAnalysis(id);
-      }
+    const refresh = () => {
+      if (remoteStreams.get(id) !== stream) return;
+      stopAnalysis(id);
+      analyzeAudio(id, stream);
       renderTile(id);
     };
+    if (remoteStreams.get(id) !== stream) {
+      remoteStreams.set(id, stream);
+      stream.addEventListener("addtrack", refresh);
+      stream.addEventListener("removetrack", refresh);
+    }
+    event.track.addEventListener("unmute", refresh);
+    event.track.addEventListener("ended", () => {
+      if (remoteStreams.get(id) !== stream) return;
+      stream.removeTrack(event.track);
+      refresh();
+    });
+    refresh();
   }
 
   async function enumerateDevices() {
@@ -257,7 +268,7 @@
 
   function applyAudioOutput() {
     if (!el["audio-output"].value) return;
-    for (const video of el.videos.querySelectorAll("video")) video.setSinkId?.(el["audio-output"].value).catch(() => {});
+    for (const audio of el.videos.querySelectorAll("audio")) audio.setSinkId?.(el["audio-output"].value).catch(() => {});
   }
 
   async function loadIceServers() {
@@ -279,9 +290,14 @@
     if (!navigator.mediaDevices?.getUserMedia) throw new Error("Камера и микрофон доступны только через HTTPS");
     const select = kind === "audio" ? el["audio-input"] : el["video-input"];
     const constraints = { [kind]: select.value ? { deviceId: { exact: select.value } } : true };
+    const token = attempt;
     let stream;
     try { stream = await navigator.mediaDevices.getUserMedia(constraints); }
     catch { stream = await navigator.mediaDevices.getUserMedia({ [kind]: true }); }
+    if (token !== attempt) {
+      stream.getTracks().forEach((track) => track.stop());
+      throw new Error("Соединение закрыто");
+    }
     return stream.getTracks().find((track) => track.kind === kind);
   }
 
@@ -305,8 +321,7 @@
   }
 
   function videoSender() {
-    return pc?.getSenders().find((item) => item.track?.kind === "video") ||
-      pc?.getTransceivers().find((transceiver) => transceiver.receiver?.track?.kind === "video")?.sender;
+    return localSenders.video;
   }
 
   function applyBitrate() {
@@ -335,11 +350,15 @@
     return socket;
   }
 
-  async function handleMessage(message) {
-    if (!pc || !ws || ws.readyState !== WebSocket.OPEN) return;
+  async function handleMessage(message, token) {
+    if (token !== attempt || !pc || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const connection = pc;
+    const socket = ws;
     if (message.type === "joined") {
-      await pc.setRemoteDescription(message.data.answer);
-      for (const candidate of remoteCandidates.splice(0)) await pc.addIceCandidate(candidate);
+      await connection.setRemoteDescription(message.data.answer);
+      if (token !== attempt) return;
+      for (const candidate of remoteCandidates.splice(0)) await connection.addIceCandidate(candidate);
+      if (token !== attempt) return;
       for (const id of message.data.peers || []) {
         profiles.set(id, normalizeProfile(message.data.profiles?.[id]));
         renderTile(id);
@@ -358,11 +377,13 @@
     } else if (message.type === "peer_left") {
       removePeer(message.data.id);
     } else if (message.type === "offer") {
-      await pc.setRemoteDescription(message.data);
-      await pc.setLocalDescription(await pc.createAnswer());
-      ws.send(JSON.stringify({ type: "answer", data: pc.localDescription }));
+      await connection.setRemoteDescription(message.data);
+      if (token !== attempt) return;
+      await connection.setLocalDescription(await connection.createAnswer());
+      if (token !== attempt) return;
+      socket.send(JSON.stringify({ type: "answer", data: connection.localDescription }));
     } else if (message.type === "candidate") {
-      if (pc.remoteDescription) await pc.addIceCandidate(message.data);
+      if (connection.remoteDescription) await connection.addIceCandidate(message.data);
       else remoteCandidates.push(message.data);
     }
   }
@@ -397,7 +418,7 @@
       const iceServers = await loadIceServers();
       if (token !== attempt) return;
       pc = new RTCPeerConnection({ iceServers, bundlePolicy: "max-bundle" });
-      pc.ontrack = onTrack;
+      pc.ontrack = (event) => { if (token === attempt) onTrack(event); };
       pc.onicecandidate = (event) => {
         if (!event.candidate || token !== attempt) return;
         const candidate = event.candidate.toJSON();
@@ -413,9 +434,11 @@
         else if (pc.connectionState === "failed") status("Медиасоединение не установлено");
         else if (joined && pc.connectionState === "disconnected") status("Медиасоединение прервано");
       };
-      for (const track of localStream.getTracks()) pc.addTrack(track, localStream);
-      if (!localStream.getAudioTracks().length) pc.addTransceiver("audio", { direction: "sendrecv" });
-      if (!cameraTrack) pc.addTransceiver("video", { direction: "sendrecv" });
+      for (const kind of ["audio", "video"]) {
+        const track = localStream.getTracks().find((item) => item.kind === kind);
+        const transceiver = pc.addTransceiver(track || kind, { direction: "sendonly", streams: [localStream] });
+        localSenders[kind] = transceiver.sender;
+      }
       await pc.setLocalDescription(await pc.createOffer());
       await applyBitrate().catch((error) => console.warn("initial bitrate update failed", error));
       if (token !== attempt) return;
@@ -425,7 +448,8 @@
       if (token !== attempt) { socket.close(); return; }
       ws = socket;
       ws.onmessage = (event) => {
-        messageQueue = messageQueue.then(() => handleMessage(JSON.parse(event.data))).catch((error) => {
+        messageQueue = messageQueue.then(() => handleMessage(JSON.parse(event.data), token)).catch((error) => {
+          if (token !== attempt) return;
           console.error(error);
           status("Ошибка согласования соединения");
         });
@@ -452,6 +476,8 @@
     clearTimeout(noticeTimer);
     if (ws) { ws.onclose = null; ws.close(); ws = null; }
     if (pc) { pc.close(); pc = null; }
+    localSenders.audio = null;
+    localSenders.video = null;
     screenStream?.getTracks().forEach((track) => { track.onended = null; track.stop(); });
     screenStream = null;
     localStream?.getTracks().forEach((track) => track.stop());
@@ -475,10 +501,15 @@
   }
 
   async function replaceLocalTrack(kind, track) {
-    const sender = pc?.getSenders().find((item) => item.track?.kind === kind) ||
-      pc?.getTransceivers().find((tr) => tr.receiver?.track?.kind === kind)?.sender;
-    if (!sender) throw new Error("Не найден медиаканал");
-    await sender.replaceTrack(track);
+    const connection = pc;
+    const sender = localSenders[kind];
+    if (!sender) { track.stop(); throw new Error("Не найден медиаканал"); }
+    try { await sender.replaceTrack(track); }
+    catch (error) { track.stop(); throw error; }
+    if (pc !== connection || localSenders[kind] !== sender) {
+      track.stop();
+      throw new Error("Соединение закрыто");
+    }
     const old = localStream?.getTracks().find((item) => item.kind === kind);
     if (old) { localStream.removeTrack(old); old.stop(); }
     localStream ||= new MediaStream();
@@ -488,17 +519,24 @@
     analyzeAudio("local", localStream);
     renderTile("local");
     await applyBitrate().catch((error) => console.warn("bitrate update failed after track replacement", error));
+    if (pc === connection && kind === "video") requestVideoRefresh();
   }
 
   function broadcastState() {
     if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "state", data: profile() }));
   }
 
+  function requestVideoRefresh() {
+    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "refresh_video" }));
+  }
+
   async function toggleMic() {
+    const token = attempt;
     let track = localStream?.getAudioTracks()[0];
     if (!track) {
       try { track = await acquireTrack("audio"); await replaceLocalTrack("audio", track); }
-      catch { notify("Микрофон недоступен"); return; }
+      catch { if (token === attempt) notify("Микрофон недоступен"); return; }
+      if (token !== attempt) return;
       track.enabled = true;
     } else {
       track.enabled = !track.enabled;
@@ -510,11 +548,13 @@
   }
 
   async function toggleCam() {
+    const token = attempt;
     if (screenStream) { await toggleScreen(); return; }
     let track = cameraTrack;
     if (!track) {
       try { track = await acquireTrack("video"); await replaceLocalTrack("video", track); }
-      catch { notify("Камера недоступна"); return; }
+      catch { if (token === attempt) notify("Камера недоступна"); return; }
+      if (token !== attempt) return;
       track.enabled = true;
     } else {
       track.enabled = !track.enabled;
@@ -526,35 +566,49 @@
   }
 
   async function toggleScreen() {
+    const token = attempt;
     const sender = videoSender();
     if (!sender) return;
     if (screenStream) {
+      const previousScreen = screenStream;
       await sender.replaceTrack(cameraTrack);
-      screenStream.getTracks().forEach((track) => { track.onended = null; track.stop(); });
+      if (token !== attempt) return;
+      previousScreen.getTracks().forEach((track) => { track.onended = null; track.stop(); });
       screenStream = null;
     } else {
       if (!navigator.mediaDevices?.getDisplayMedia) { notify("Демонстрация экрана недоступна"); return; }
+      let stream;
       try {
-        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        if (token !== attempt) { stream.getTracks().forEach((track) => track.stop()); return; }
         await sender.replaceTrack(stream.getVideoTracks()[0]);
+        if (token !== attempt) { stream.getTracks().forEach((track) => track.stop()); return; }
         screenStream = stream;
-        stream.getVideoTracks()[0].onended = () => toggleScreen().catch(console.error);
-      } catch (error) { console.warn("screen share failed", error); return; }
+        stream.getVideoTracks()[0].onended = () => { if (token === attempt) toggleScreen().catch(console.error); };
+      } catch (error) {
+        stream?.getTracks().forEach((track) => track.stop());
+        if (token === attempt) console.warn("screen share failed", error);
+        return;
+      }
     }
     renderTile("local");
     updateControls();
     await applyBitrate().catch((error) => console.warn("bitrate update failed after screen share change", error));
+    if (token !== attempt) return;
     broadcastState();
+    requestVideoRefresh();
   }
 
   async function changeDevice(kind) {
+    const token = attempt;
     savePrefs();
     if (kind === "audiooutput") { applyAudioOutput(); return; }
     if (!joined) return;
     if (kind === "video" && screenStream) { notify("Остановите демонстрацию экрана"); return; }
     if (kind === "video") {
       const deviceId = el["video-input"].value;
-      videoDeviceUpdate = videoDeviceUpdate.catch(() => {}).then(() => changeVideoDevice(deviceId)).catch((error) => {
+      videoDeviceUpdate = videoDeviceUpdate.catch(() => {}).then(() => changeVideoDevice(deviceId, token)).catch((error) => {
+        if (token !== attempt) return;
         console.warn("camera switch failed", error);
         notify("Не удалось переключить камеру");
       });
@@ -564,20 +618,29 @@
       const track = await acquireTrack(kind);
       track.enabled = kind === "audio" ? micOn : camOn;
       await replaceLocalTrack(kind, track);
-      broadcastState();
-    } catch (error) { console.warn("device change failed", error); notify("Устройство недоступно"); }
+      if (token === attempt) broadcastState();
+    } catch (error) {
+      if (token !== attempt) return;
+      console.warn("device change failed", error);
+      notify("Устройство недоступно");
+    }
   }
 
-  async function changeVideoDevice(deviceId) {
-    if (!joined || !pc || screenStream) return;
+  async function changeVideoDevice(deviceId, token) {
+    if (token !== attempt || !joined || !pc || screenStream) return;
     const sender = videoSender();
     const previousTrack = cameraTrack;
     const previousDeviceId = previousTrack?.getSettings().deviceId || "";
     const previousEnabled = previousTrack?.enabled ?? camOn;
     const isMobile = navigator.userAgentData?.mobile || /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
     const acquireVideo = async (id) => {
+      if (token !== attempt) throw new Error("Соединение закрыто");
       const constraints = id ? { deviceId: { exact: id } } : true;
       const stream = await navigator.mediaDevices.getUserMedia({ video: constraints });
+      if (token !== attempt) {
+        stream.getTracks().forEach((item) => item.stop());
+        throw new Error("Соединение закрыто");
+      }
       const track = stream.getVideoTracks()[0];
       if (!track) {
         stream.getTracks().forEach((item) => item.stop());
@@ -587,6 +650,7 @@
     };
     const releasePrevious = async () => {
       await sender.replaceTrack(null);
+      if (token !== attempt) throw new Error("Соединение закрыто");
       localStream?.removeTrack(previousTrack);
       previousTrack.stop();
       cameraTrack = null;
@@ -595,11 +659,13 @@
       const restored = await acquireVideo(previousDeviceId);
       restored.enabled = previousEnabled;
       await sender.replaceTrack(restored);
+      if (token !== attempt) { restored.stop(); return; }
       localStream ||= new MediaStream();
       localStream.addTrack(restored);
       cameraTrack = restored;
       renderTile("local");
       await applyBitrate().catch((error) => console.warn("bitrate update failed after camera restore", error));
+      if (token === attempt) requestVideoRefresh();
     };
 
     let track;
@@ -611,6 +677,7 @@
       }
       track = await acquireVideo(deviceId);
     } catch (firstError) {
+      if (token !== attempt) return;
       if (!previousTrack || !sender) throw firstError;
       if (!releasedPrevious) {
         await releasePrevious();
@@ -634,6 +701,7 @@
 
     track.enabled = camOn;
     await replaceLocalTrack("video", track);
+    if (token !== attempt) return;
     savePrefs();
     broadcastState();
   }
@@ -689,6 +757,12 @@
   el["audio-output"].onchange = () => changeDevice("audiooutput");
   el["video-input"].onchange = () => changeDevice("video");
   navigator.mediaDevices?.addEventListener("devicechange", enumerateDevices);
+  document.addEventListener("pointerdown", () => {
+    audioContext?.resume().catch(() => {});
+    for (const audio of el.videos.querySelectorAll("audio")) {
+      if (audio.srcObject) audio.play().catch(() => {});
+    }
+  });
   window.addEventListener("beforeunload", () => leave());
   updateControls();
   enumerateDevices().then(() => {
