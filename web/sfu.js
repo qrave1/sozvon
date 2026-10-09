@@ -37,7 +37,22 @@
   const remoteStreams = new Map();
   const profiles = new Map();
   const mutedPeers = new Set();
+  const peerVolumes = new Map();
   const analysers = new Map();
+
+  function loadPeerVolumes() {
+    try {
+      const stored = JSON.parse(localStorage.getItem("sozvon.sfu.peerVolumes")) || {};
+      for (const [id, value] of Object.entries(stored)) {
+        if (Number.isFinite(value)) peerVolumes.set(id, Math.max(0, Math.min(1, value)));
+      }
+    } catch { /* Storage can be unavailable in private mode. */ }
+  }
+
+  function savePeerVolumes() {
+    try { localStorage.setItem("sozvon.sfu.peerVolumes", JSON.stringify(Object.fromEntries(peerVolumes))); }
+    catch { /* Storage can be unavailable in private mode. */ }
+  }
 
   function loadPrefs() {
     try { return JSON.parse(localStorage.getItem(PREFS_KEY)) || {}; } catch { return {}; }
@@ -135,6 +150,23 @@
         if (mutedPeers.has(id)) mutedPeers.delete(id); else mutedPeers.add(id);
         renderTile(id);
       };
+      const volume = document.createElement("input");
+      volume.type = "range";
+      volume.min = "0";
+      volume.max = "100";
+      volume.step = "1";
+      volume.className = "peer-volume";
+      volume.title = "Громкость участника для вас";
+      volume.setAttribute("aria-label", "Громкость участника для вас");
+      volume.onclick = (event) => event.stopPropagation();
+      volume.oninput = (event) => {
+        event.stopPropagation();
+        const value = Number(volume.value) / 100;
+        peerVolumes.set(id, value);
+        audio.volume = value;
+        volume.setAttribute("aria-valuetext", `${volume.value}%`);
+        savePeerVolumes();
+      };
       const fullscreen = document.createElement("button");
       fullscreen.className = "peer-fullscreen rounded-lg border border-white/10 bg-slate-950/75 px-2 py-1 text-xs text-white opacity-0 backdrop-blur transition group-hover:opacity-100";
       fullscreen.textContent = "⛶";
@@ -150,7 +182,7 @@
         el.videos.classList.toggle("spotlight", !!activeId);
         for (const item of el.videos.children) item.classList.toggle("active-lg", item.id === `tile-${activeId}`);
       };
-      tile.append(video, audio, avatar, mute, badge, fullscreen, label);
+      tile.append(video, audio, avatar, mute, volume, badge, fullscreen, label);
       el.videos.append(tile);
     }
 
@@ -162,6 +194,12 @@
     const hasVideo = !!stream?.getVideoTracks().length && (info.camOn || info.screenShare);
     video.muted = true;
     audio.muted = own || mutedPeers.has(id);
+    const peerVolume = peerVolumes.get(id) ?? 1;
+    audio.volume = peerVolume;
+    const volume = tile.querySelector(".peer-volume");
+    volume.hidden = own;
+    volume.value = String(Math.round(peerVolume * 100));
+    volume.setAttribute("aria-valuetext", `${volume.value}%`);
     if (video.srcObject !== stream) {
       video.srcObject = stream || null;
       if (stream) video.play().catch(() => {});
@@ -732,6 +770,7 @@
   }
 
   const prefs = loadPrefs();
+  loadPeerVolumes();
   el.name.value = prefs.name || "";
   el.room.value = new URLSearchParams(location.search).get("room") || new URLSearchParams(location.search).get("id") || prefs.room || "";
   el.color.value = COLORS.includes(prefs.prefColor) ? prefs.prefColor : "";
