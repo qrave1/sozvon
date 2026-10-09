@@ -29,6 +29,7 @@ type testPeer struct {
 	answer     webrtc.SessionDescription
 	peers      []string
 	profiles   map[string]peerProfile
+	chatHistory []chatMessage
 	readDone   chan struct{}
 	tracks     chan *webrtc.TrackRemote
 }
@@ -185,6 +186,7 @@ func connectTestPeerWithKinds(t *testing.T, wsURL, roomID string, kind webrtc.RT
 		Answer   webrtc.SessionDescription `json:"answer"`
 		Peers    []string                  `json:"peers"`
 		Profiles map[string]peerProfile    `json:"profiles"`
+		ChatHistory []chatMessage           `json:"chatHistory"`
 	}
 	if err := json.Unmarshal(joined.Data, &payload); err != nil {
 		t.Fatal(err)
@@ -201,6 +203,7 @@ func connectTestPeerWithKinds(t *testing.T, wsURL, roomID string, kind webrtc.RT
 	p.id = payload.ID
 	p.peers = payload.Peers
 	p.profiles = payload.Profiles
+	p.chatHistory = payload.ChatHistory
 	go func() {
 		defer close(p.readDone)
 		for {

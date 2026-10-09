@@ -19,6 +19,7 @@ Subscription changes during an outstanding offer remain pending until its answer
 | Bitrate changed while connected | Active sender parameters update immediately | Chromium |
 | Camera replaced with screen, then restored | Remote video keeps decoding | Chromium with canvas screen source |
 | Participant leaves and rejoins | Old streams disappear, new streams reach everyone | Go integration and Chromium |
+| Chat message sent in a room | Current participants receive it; later participants receive unexpired history | Go integration |
 | Camera acquisition finishes after leave | Acquired track stops and does not restore departed UI | Chromium |
 | Subscriber requests a keyframe | PLI/FIR becomes PLI addressed to the publisher's SSRC | Go RTCP integration |
 | Producer RTP contains transport extensions | Incoming MID/RID/transport extension IDs do not leak downstream | Go RTP integration |
@@ -26,6 +27,13 @@ Subscription changes during an outstanding offer remain pending until its answer
 Default Pion interceptors handle downstream retransmissions. Subscriber keyframe
 feedback is explicitly routed upstream; transport-scoped extensions are stripped
 before forwarding RTP. Device and screen changes also request a fresh video frame.
+
+SFU chat history is held in server memory for 24 hours. A joining participant
+receives the latest 100 unexpired messages for the room. History is lost when
+the server process restarts; at most 1,000 room histories are retained, and
+the oldest room history is evicted when that limit is exceeded. Empty and
+messages longer than 2,000 Unicode code points are rejected. Expired history
+is pruned when accessed and when capacity is reached.
 
 ## Run Checks
 

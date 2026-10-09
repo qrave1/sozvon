@@ -11,6 +11,7 @@
   const el = Object.fromEntries([
     "name", "room", "join", "leave", "welcome", "mic", "cam", "screen", "share", "settings", "status",
     "device-bar", "settings-close", "audio-input", "audio-output", "video-input", "color", "bitrate", "videos", "toast",
+    "room-content", "room-tabs", "video-tab", "chat-tab", "chat-panel", "chat-messages", "chat-form", "chat-input",
   ].map((id) => [id, document.getElementById(id)]));
 
   let pc = null;
@@ -23,6 +24,7 @@
   let micOn = true;
   let camOn = false;
   let activeId = null;
+  let localPeerID = "";
   let attempt = 0;
   let messageQueue = Promise.resolve();
   let joinSent = false;
@@ -109,6 +111,8 @@
 
   function updateControls() {
     el.welcome.hidden = joined || busy;
+    el["room-content"].hidden = !joined;
+    el["room-tabs"].hidden = !joined;
     el.join.hidden = joined;
     el.join.disabled = busy;
     el.leave.hidden = !joined && !busy;
@@ -408,6 +412,9 @@
         profiles.set(id, normalizeProfile(message.data.profiles?.[id]));
         renderTile(id);
       }
+      localPeerID = message.data.id;
+      el["chat-messages"].replaceChildren();
+      for (const chatMessage of message.data.chatHistory || []) appendChatMessage(chatMessage);
       joined = true;
       busy = false;
       document.title = `Sozvon SFU - ${el.room.value}`;
@@ -430,7 +437,47 @@
     } else if (message.type === "candidate") {
       if (connection.remoteDescription) await connection.addIceCandidate(message.data);
       else remoteCandidates.push(message.data);
+    } else if (message.type === "chat_message") {
+      appendChatMessage(message.data);
+    } else if (message.type === "chat_error") {
+      notify(message.data.message || "Не удалось отправить сообщение");
     }
+  }
+
+  function appendChatMessage(message) {
+    const article = document.createElement("article");
+    article.className = `chat-message${message.senderId === localPeerID ? " own" : ""}`;
+    const header = document.createElement("header");
+    const name = document.createElement("strong");
+    name.textContent = message.name || "Участник";
+    if (/^#[0-9a-f]{6}$/i.test(message.color || "")) name.style.color = message.color;
+    const time = document.createElement("time");
+    const date = new Date(message.sentAt);
+    time.dateTime = date.toISOString();
+    time.textContent = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    header.append(name, time);
+    const text = document.createElement("div");
+    text.className = "text-sm text-slate-200";
+    text.textContent = message.text;
+    article.append(header, text);
+    el["chat-messages"].append(article);
+    el["chat-messages"].scrollTop = el["chat-messages"].scrollHeight;
+  }
+
+  function sendChatMessage(event) {
+    event.preventDefault();
+    const text = el["chat-input"].value.trim();
+    if (!text || !joined || ws?.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: "chat_send", data: { text } }));
+    el["chat-input"].value = "";
+  }
+
+  function setRoomTab(tab) {
+    const chatActive = tab === "chat";
+    el["room-content"].classList.toggle("chat-active", chatActive);
+    el["video-tab"].setAttribute("aria-pressed", String(!chatActive));
+    el["chat-tab"].setAttribute("aria-pressed", String(chatActive));
+    if (chatActive) el["chat-input"].focus();
   }
 
   async function join() {
@@ -518,6 +565,7 @@
     remoteCandidates.length = 0;
     busy = false;
     joined = false;
+    localPeerID = "";
     clearTimeout(noticeTimer);
     if (ws) { ws.onclose = null; ws.close(); ws = null; }
     if (pc) { pc.close(); pc = null; }
@@ -539,6 +587,8 @@
     activeId = null;
     el.videos.classList.remove("spotlight");
     el.videos.replaceChildren();
+    el["chat-messages"].replaceChildren();
+    setRoomTab("video");
     document.title = "Sozvon SFU";
     messageQueue = Promise.resolve();
     updateControls();
@@ -780,6 +830,9 @@
   el["video-input"].dataset.preferred = prefs.videoId || "";
   el.join.onclick = join;
   el.leave.onclick = () => leave();
+  el["chat-form"].addEventListener("submit", sendChatMessage);
+  el["video-tab"].onclick = () => setRoomTab("video");
+  el["chat-tab"].onclick = () => setRoomTab("chat");
   el.mic.onclick = toggleMic;
   el.cam.onclick = toggleCam;
   el.screen.onclick = () => toggleScreen().catch(console.error);

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
@@ -14,6 +15,7 @@ import (
 type room struct {
 	id           string
 	mu           sync.RWMutex
+	chatMu       sync.Mutex
 	peers        map[string]*peer
 	profiles     map[string]peerProfile
 	announced    map[string]bool
@@ -61,7 +63,9 @@ func parseProfile(raw json.RawMessage) peerProfile {
 	return profile
 }
 
-func (r *room) announce(p *peer) bool {
+func (r *room) announce(p *peer, chat *chatStore) bool {
+	r.chatMu.Lock()
+	defer r.chatMu.Unlock()
 	r.mu.Lock()
 	if r.peers[p.id] != p {
 		r.mu.Unlock()
@@ -79,12 +83,35 @@ func (r *room) announce(p *peer) bool {
 	}
 	r.announced[p.id] = true
 	profile := r.profiles[p.id]
-	p.sendMessage("joined", map[string]any{"id": p.id, "answer": p.pc.LocalDescription(), "peers": ids, "profiles": profiles})
+	history := chat.history(r.id, time.Now())
+	p.sendMessage("joined", map[string]any{"id": p.id, "answer": p.pc.LocalDescription(), "peers": ids, "profiles": profiles, "chatHistory": history})
 	r.mu.Unlock()
 	for _, other := range peers {
 		other.sendMessage("peer_joined", map[string]any{"id": p.id, "profile": profile})
 	}
 	return true
+}
+
+func (r *room) broadcastChat(store *chatStore, sender *peer, text string) {
+	r.chatMu.Lock()
+	defer r.chatMu.Unlock()
+	r.mu.RLock()
+	if r.peers[sender.id] != sender || !r.announced[sender.id] {
+		r.mu.RUnlock()
+		return
+	}
+	profile := r.profiles[sender.id]
+	recipients := make([]*peer, 0, len(r.peers))
+	for _, p := range r.peers {
+		if r.announced[p.id] {
+			recipients = append(recipients, p)
+		}
+	}
+	r.mu.RUnlock()
+	msg := store.add(r.id, profile, sender.id, text, time.Now())
+	for _, p := range recipients {
+		p.sendMessage("chat_message", msg)
+	}
 }
 
 func (r *room) updateProfile(p *peer, profile peerProfile) {

@@ -19,12 +19,13 @@ import (
 type Server struct {
 	mu      sync.Mutex
 	rooms   map[string]*room
+	chat    *chatStore
 	api     *webrtc.API
 	udpConn net.PacketConn
 }
 
 func NewServer() *Server {
-	return &Server{rooms: make(map[string]*room), api: webrtc.NewAPI()}
+	return &Server{rooms: make(map[string]*room), chat: newChatStore(), api: webrtc.NewAPI()}
 }
 
 func NewServerWithUDP(port uint16, publicIP string) (*Server, error) {
@@ -52,6 +53,7 @@ func NewServerWithUDP(port uint16, publicIP string) (*Server, error) {
 	}
 	return &Server{
 		rooms:   make(map[string]*room),
+		chat:    newChatStore(),
 		api:     webrtc.NewAPI(webrtc.WithSettingEngine(settings)),
 		udpConn: conn,
 	}, nil
@@ -186,7 +188,7 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 		s.removePeer(room, p)
 		return
 	}
-	if !room.announce(p) {
+	if !room.announce(p, s.chat) {
 		return
 	}
 	if err := p.activate(room); err != nil {
@@ -226,6 +228,20 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 			room.updateProfile(p, parseProfile(msg.Data))
 		case "refresh_video":
 			room.requestPublishedKeyframes(p)
+		case "chat_send":
+			var payload struct {
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(msg.Data, &payload) != nil {
+				p.sendMessage("chat_error", map[string]string{"message": "Некорректное сообщение"})
+				break
+			}
+			text, ok := parseChatText(payload.Text)
+			if !ok {
+				p.sendMessage("chat_error", map[string]string{"message": "Сообщение пустое или слишком длинное"})
+				break
+			}
+			room.broadcastChat(s.chat, p, text)
 		}
 	}
 	s.removePeer(room, p)
