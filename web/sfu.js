@@ -10,7 +10,7 @@
   };
   const el = Object.fromEntries([
     "name", "room", "join", "leave", "welcome", "mic", "cam", "screen", "share", "chat-toggle", "settings", "status",
-    "device-bar", "settings-close", "audio-input", "audio-output", "video-input", "color", "bitrate", "videos", "toast",
+    "device-bar", "audio-input", "audio-output", "video-input", "color", "bitrate", "videos", "toast",
     "room-content", "room-tabs", "video-tab", "chat-tab", "chat-panel", "chat-messages", "chat-form", "chat-input",
   ].map((id) => [id, document.getElementById(id)]));
 
@@ -853,10 +853,6 @@
   el.settings.onclick = () => {
     el["device-bar"].hidden = !el["device-bar"].hidden;
     el.settings.setAttribute("aria-pressed", String(!el["device-bar"].hidden));
-  };
-  el["settings-close"].onclick = () => {
-    el["device-bar"].hidden = true;
-    el.settings.setAttribute("aria-pressed", "false");
   };
   el.name.addEventListener("input", () => { savePrefs(); if (document.getElementById("tile-local")) renderTile("local"); });
   el.room.addEventListener("input", savePrefs);
