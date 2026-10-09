@@ -252,6 +252,11 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.announce()
+	if err := p.activate(); err != nil {
+		slog.Warn("sfu initial subscriptions failed", "peer", p.id, "error", err)
+		p.close(s)
+		return
+	}
 
 	for {
 		var msg message
@@ -357,10 +362,34 @@ func (p *peer) acceptOffer(offer webrtc.SessionDescription) error {
 	if err := p.pc.SetLocalDescription(answer); err != nil {
 		return err
 	}
-	p.ready = true
-	p.dirty = false
 	p.requestKeyframes()
 	return nil
+}
+
+func (p *peer) activate() error {
+	p.negMu.Lock()
+	defer p.negMu.Unlock()
+
+	p.room.mu.RLock()
+	publications := make([]*publication, 0, len(p.room.publications))
+	for _, pub := range p.room.publications {
+		if pub.owner != p {
+			publications = append(publications, pub)
+		}
+	}
+	p.room.mu.RUnlock()
+
+	for _, pub := range publications {
+		if _, exists := p.subscriptions[pub.id]; exists {
+			continue
+		}
+		if err := p.addSubscriptionLocked(pub); err != nil {
+			return err
+		}
+		p.dirty = true
+	}
+	p.ready = true
+	return p.sendOfferLocked()
 }
 
 func (p *peer) announce() {
@@ -435,6 +464,9 @@ func (p *peer) addSubscriptionLocked(pub *publication) error {
 func (p *peer) addSubscription(pub *publication) {
 	p.negMu.Lock()
 	defer p.negMu.Unlock()
+	if _, exists := p.subscriptions[pub.id]; exists {
+		return
+	}
 	if err := p.addSubscriptionLocked(pub); err != nil {
 		slog.Warn("sfu add subscription failed", "peer", p.id, "error", err)
 		return

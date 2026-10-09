@@ -33,6 +33,10 @@ type testPeer struct {
 }
 
 func connectTestPeer(t *testing.T, wsURL, roomID string, kind webrtc.RTPCodecType, publish bool, profile ...peerProfile) (*testPeer, *webrtc.TrackLocalStaticRTP) {
+	return connectTestPeerWithKinds(t, wsURL, roomID, kind, publish, nil, profile...)
+}
+
+func connectTestPeerWithKinds(t *testing.T, wsURL, roomID string, kind webrtc.RTPCodecType, publish bool, extraKinds []webrtc.RTPCodecType, profile ...peerProfile) (*testPeer, *webrtc.TrackLocalStaticRTP) {
 	t.Helper()
 	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
@@ -81,6 +85,13 @@ func connectTestPeer(t *testing.T, wsURL, roomID string, kind webrtc.RTPCodecTyp
 		Direction: webrtc.RTPTransceiverDirectionRecvonly,
 	}); err != nil {
 		t.Fatal(err)
+	}
+	for _, extraKind := range extraKinds {
+		if _, err := pc.AddTransceiverFromKind(extraKind, webrtc.RTPTransceiverInit{
+			Direction: webrtc.RTPTransceiverDirectionRecvonly,
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	offer, err := pc.CreateOffer(nil)
 	if err != nil {
@@ -500,7 +511,8 @@ func TestLateSubscriber(t *testing.T) {
 	httpServer := httptest.NewServer(http.HandlerFunc(server.HandleWS))
 	defer httpServer.Close()
 	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http")
-	_, outgoing := connectTestPeer(t, wsURL, "late", webrtc.RTPCodecTypeAudio, true)
+	_, audio := connectTestPeer(t, wsURL, "late", webrtc.RTPCodecTypeAudio, true)
+	_, video := connectTestPeer(t, wsURL, "late", webrtc.RTPCodecTypeVideo, true)
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -514,9 +526,13 @@ func TestLateSubscriber(t *testing.T) {
 				return
 			case <-ticker.C:
 				sequence++
-				_ = outgoing.WriteRTP(&rtp.Packet{
+				_ = audio.WriteRTP(&rtp.Packet{
 					Header:  rtp.Header{Version: 2, SequenceNumber: sequence, Timestamp: uint32(sequence) * 960},
 					Payload: []byte{0xf8, 0xff, 0xfe},
+				})
+				_ = video.WriteRTP(&rtp.Packet{
+					Header:  rtp.Header{Version: 2, SequenceNumber: sequence, Timestamp: uint32(sequence) * 3000},
+					Payload: []byte{0x10, 0x00, 0x00},
 				})
 			}
 		}
@@ -529,7 +545,7 @@ func TestLateSubscriber(t *testing.T) {
 			r.mu.RLock()
 			count := len(r.publications)
 			r.mu.RUnlock()
-			if count > 0 {
+			if count == 2 {
 				break
 			}
 		}
@@ -539,11 +555,16 @@ func TestLateSubscriber(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	subscriber, _ := connectTestPeer(t, wsURL, "late", webrtc.RTPCodecTypeAudio, false)
-	select {
-	case <-subscriber.packets:
-	case <-time.After(8 * time.Second):
-		t.Fatal("late subscriber did not receive RTP")
+	subscriber, _ := connectTestPeerWithKinds(t, wsURL, "late", webrtc.RTPCodecTypeAudio, false, []webrtc.RTPCodecType{webrtc.RTPCodecTypeVideo})
+	for range 2 {
+		select {
+		case packet := <-subscriber.packets:
+			if len(packet.Payload) == 0 {
+				t.Fatal("late subscriber received empty RTP packet")
+			}
+		case <-time.After(8 * time.Second):
+			t.Fatal("late subscriber did not receive every existing RTP track")
+		}
 	}
 }
 
