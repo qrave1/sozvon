@@ -9,7 +9,7 @@
     high: { cam: 8000000, screen: 16000000 },
   };
   const el = Object.fromEntries([
-    "name", "room", "join", "leave", "welcome", "welcome-name", "welcome-room", "welcome-join", "mic", "cam", "screen", "share", "settings", "status",
+    "name", "room", "join", "leave", "welcome", "mic", "cam", "screen", "share", "settings", "status",
     "device-bar", "settings-close", "audio-input", "audio-output", "video-input", "color", "bitrate", "videos", "toast",
   ].map((id) => [id, document.getElementById(id)]));
 
@@ -745,15 +745,6 @@
   el.cam.onclick = toggleCam;
   el.screen.onclick = () => toggleScreen().catch(console.error);
   el.share.onclick = share;
-  el["welcome-join"].onclick = () => {
-    el.name.value = el["welcome-name"].value;
-    el.room.value = el["welcome-room"].value;
-    el.join.click();
-  };
-  el["welcome-name"].addEventListener("input", () => { el.name.value = el["welcome-name"].value; });
-  el["welcome-room"].addEventListener("input", () => { el.room.value = el["welcome-room"].value; });
-  el.name.addEventListener("input", () => { el["welcome-name"].value = el.name.value; });
-  el.room.addEventListener("input", () => { el["welcome-room"].value = el.room.value; });
   el.settings.onclick = () => {
     el["device-bar"].hidden = !el["device-bar"].hidden;
     el.settings.setAttribute("aria-pressed", String(!el["device-bar"].hidden));
