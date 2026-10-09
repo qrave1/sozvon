@@ -1,6 +1,7 @@
 package sfu
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -10,7 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 )
@@ -87,26 +89,28 @@ func connectTestPeer(t *testing.T, wsURL, roomID string, kind webrtc.RTPCodecTyp
 	if err := pc.SetLocalDescription(offer); err != nil {
 		t.Fatal(err)
 	}
-	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ws, _, err := websocket.Dial(dialCtx, wsURL, nil)
+	dialCancel()
 	if err != nil {
 		t.Fatal(err)
 	}
 	p.ws = ws
-	t.Cleanup(func() { ws.Close() })
+	t.Cleanup(func() { ws.CloseNow() })
 	t.Cleanup(func() { close(p.done) })
 	joinData, _ := json.Marshal(pc.LocalDescription())
 	join := message{Type: "join", Room: roomID, Data: joinData}
 	if len(profile) > 0 {
 		join.Profile, _ = json.Marshal(profile[0])
 	}
-	if err := ws.WriteJSON(join); err != nil {
+	if err := wsjson.Write(context.Background(), ws, join); err != nil {
 		t.Fatal(err)
 	}
 	go func() {
 		for {
 			select {
 			case msg := <-p.send:
-				if ws.WriteJSON(msg) != nil {
+				if wsjson.Write(context.Background(), ws, msg) != nil {
 					return
 				}
 			case <-p.done:
@@ -114,12 +118,12 @@ func connectTestPeer(t *testing.T, wsURL, roomID string, kind webrtc.RTPCodecTyp
 			}
 		}
 	}()
-	ws.SetReadDeadline(time.Now().Add(10 * time.Second))
+	readCtx, readCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	var joined message
 	var pending []webrtc.ICECandidateInit
 	for joined.Type != "joined" {
 		var msg message
-		if err := ws.ReadJSON(&msg); err != nil {
+		if err := wsjson.Read(readCtx, ws, &msg); err != nil {
 			t.Fatal(err)
 		}
 		if msg.Type == "candidate" {
@@ -135,6 +139,7 @@ func connectTestPeer(t *testing.T, wsURL, roomID string, kind webrtc.RTPCodecTyp
 			t.Fatalf("expected joined or candidate, got %q", msg.Type)
 		}
 	}
+	readCancel()
 	var payload struct {
 		ID       string                    `json:"id"`
 		Answer   webrtc.SessionDescription `json:"answer"`
@@ -156,12 +161,11 @@ func connectTestPeer(t *testing.T, wsURL, roomID string, kind webrtc.RTPCodecTyp
 	p.id = payload.ID
 	p.peers = payload.Peers
 	p.profiles = payload.Profiles
-	ws.SetReadDeadline(time.Time{})
 	go func() {
 		defer close(p.readDone)
 		for {
 			var msg message
-			if err := ws.ReadJSON(&msg); err != nil {
+			if err := wsjson.Read(context.Background(), ws, &msg); err != nil {
 				return
 			}
 			if msg.Type == "candidate" {
@@ -222,7 +226,7 @@ func TestRoomRoster(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("first peer did not receive peer_joined")
 	}
-	second.ws.Close()
+	second.ws.CloseNow()
 	select {
 	case msg := <-first.events:
 		if msg.Type != "peer_left" {
@@ -259,7 +263,7 @@ func TestPeerProfiles(t *testing.T) {
 	}
 	updated := peerProfile{Name: "Борис", MicOn: true, CamOn: false, ScreenShare: true, Color: "#e74c3c"}
 	data, _ := json.Marshal(updated)
-	if err := second.ws.WriteJSON(message{Type: "state", Data: data}); err != nil {
+	if err := wsjson.Write(context.Background(), second.ws, message{Type: "state", Data: data}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -314,13 +318,15 @@ func TestTrickleICEConnection(t *testing.T) {
 	if err := pc.SetLocalDescription(offer); err != nil {
 		t.Fatal(err)
 	}
-	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ws, _, err := websocket.Dial(dialCtx, wsURL, nil)
+	dialCancel()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ws.Close()
+	defer ws.CloseNow()
 	data, _ := json.Marshal(pc.LocalDescription())
-	if err := ws.WriteJSON(message{Type: "join", Room: "trickle", Data: data}); err != nil {
+	if err := wsjson.Write(context.Background(), ws, message{Type: "join", Room: "trickle", Data: data}); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan struct{})
@@ -330,7 +336,7 @@ func TestTrickleICEConnection(t *testing.T) {
 			select {
 			case candidate := <-localCandidates:
 				data, _ := json.Marshal(candidate)
-				if ws.WriteJSON(message{Type: "candidate", Data: data}) != nil {
+				if wsjson.Write(context.Background(), ws, message{Type: "candidate", Data: data}) != nil {
 					return
 				}
 			case <-done:
@@ -343,7 +349,7 @@ func TestTrickleICEConnection(t *testing.T) {
 	go func() {
 		for {
 			var msg message
-			if ws.ReadJSON(&msg) != nil {
+			if wsjson.Read(context.Background(), ws, &msg) != nil {
 				return
 			}
 			events <- msg
@@ -461,7 +467,7 @@ func TestForwardsRTPWithinRoom(t *testing.T) {
 				t.Fatal("RTP crossed room boundary")
 			default:
 			}
-			publisher.ws.Close()
+			publisher.ws.CloseNow()
 			deadline := time.Now().Add(2 * time.Second)
 			for {
 				r := server.getRoomForTest("room-a")

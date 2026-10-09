@@ -1,9 +1,10 @@
 module github.com/qrave1/sozvon
 
-go 1.26
+go 1.27
 
 require (
 	github.com/caarlos0/env/v11 v11.4.1
+	github.com/coder/websocket v1.8.15
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/pion/logging v0.2.4

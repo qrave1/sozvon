@@ -1,20 +1,21 @@
 package sfu
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 	"github.com/google/uuid"
-	"github.com/gorilla/websocket"
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 )
@@ -172,6 +173,8 @@ type peer struct {
 	profile peerProfile
 	pc      *webrtc.PeerConnection
 	ws      *websocket.Conn
+	ctx     context.Context
+	cancel  context.CancelFunc
 	send    chan message
 	done    chan struct{}
 	once    sync.Once
@@ -183,49 +186,39 @@ type peer struct {
 	subscriptions map[string]*webrtc.RTPSender
 }
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		origin := r.Header.Get("Origin")
-		if origin == "" {
-			return true
-		}
-		u, err := url.Parse(origin)
-		return err == nil && strings.EqualFold(u.Host, r.Host)
-	},
-}
-
 func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
-	ws, err := upgrader.Upgrade(w, r, nil)
+	ws, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return
 	}
 	ws.SetReadLimit(maxMessageSize)
-	ws.SetReadDeadline(time.Now().Add(pongWait))
-	ws.SetPongHandler(func(string) error {
-		return ws.SetReadDeadline(time.Now().Add(pongWait))
-	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	var first message
-	if err := ws.ReadJSON(&first); err != nil || first.Type != "join" || first.Room == "" || len(first.Room) > 128 {
-		ws.Close()
+	joinCtx, joinCancel := context.WithTimeout(ctx, pongWait)
+	err = wsjson.Read(joinCtx, ws, &first)
+	joinCancel()
+	if err != nil || first.Type != "join" || first.Room == "" || len(first.Room) > 128 {
+		ws.CloseNow()
 		return
 	}
 
 	var offer webrtc.SessionDescription
 	if err := json.Unmarshal(first.Data, &offer); err != nil || offer.Type != webrtc.SDPTypeOffer {
-		ws.Close()
+		ws.CloseNow()
 		return
 	}
 
 	pc, err := s.api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		slog.Error("sfu peer creation failed", "error", err)
-		ws.Close()
+		ws.CloseNow()
 		return
 	}
 
 	p := &peer{
-		id: uuid.NewString(), pc: pc, ws: ws,
+		id: uuid.NewString(), pc: pc, ws: ws, ctx: ctx, cancel: cancel,
 		profile: parseProfile(first.Profile),
 		send:    make(chan message, 256), done: make(chan struct{}),
 		subscriptions: make(map[string]*webrtc.RTPSender),
@@ -262,8 +255,8 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 
 	for {
 		var msg message
-		if err := ws.ReadJSON(&msg); err != nil {
-			if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+		if err := wsjson.Read(ctx, ws, &msg); err != nil {
+			if status := websocket.CloseStatus(err); status != websocket.StatusNormalClosure && status != websocket.StatusGoingAway && !errors.Is(err, context.Canceled) {
 				slog.Info("sfu websocket read ended", "peer", p.id, "room", p.room.id, "error", err)
 			}
 			break
@@ -307,7 +300,7 @@ func (p *peer) sendMessage(typ string, data any) {
 	case <-p.done:
 	default:
 		slog.Warn("sfu signaling buffer full", "peer", p.id)
-		p.ws.Close()
+		p.ws.CloseNow()
 	}
 }
 
@@ -317,15 +310,19 @@ func (p *peer) writeLoop() {
 	for {
 		select {
 		case msg := <-p.send:
-			p.ws.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := p.ws.WriteJSON(msg); err != nil {
-				p.ws.Close()
+			ctx, cancel := context.WithTimeout(p.ctx, writeWait)
+			err := wsjson.Write(ctx, p.ws, msg)
+			cancel()
+			if err != nil {
+				p.ws.CloseNow()
 				return
 			}
 		case <-ticker.C:
-			p.ws.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := p.ws.WriteMessage(websocket.PingMessage, nil); err != nil {
-				p.ws.Close()
+			ctx, cancel := context.WithTimeout(p.ctx, pongWait-pingPeriod)
+			err := p.ws.Ping(ctx)
+			cancel()
+			if err != nil {
+				p.ws.CloseNow()
 				return
 			}
 		case <-p.done:
@@ -554,7 +551,8 @@ func (r *room) removePublication(pub *publication) {
 func (p *peer) close(s *Server) {
 	p.once.Do(func() {
 		close(p.done)
-		p.ws.Close()
+		p.cancel()
+		p.ws.CloseNow()
 		p.pc.Close()
 		r := p.room
 		r.mu.Lock()

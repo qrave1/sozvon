@@ -1,5 +1,5 @@
 # этап сборки
-FROM golang:1.26-alpine3.24 AS builder
+FROM golang:1.27-alpine3.24 AS builder
 
 WORKDIR /app
 
