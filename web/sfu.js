@@ -28,6 +28,7 @@
   let attempt = 0;
   let messageQueue = Promise.resolve();
   let joinSent = false;
+  const mobileLayout = window.matchMedia("(max-width: 600px)");
   const localCandidates = [];
   const remoteCandidates = [];
   let audioContext = null;
@@ -440,6 +441,7 @@
       else remoteCandidates.push(message.data);
     } else if (message.type === "chat_message") {
       appendChatMessage(message.data);
+      if (message.data.senderId !== localPeerID && !isChatVisible()) setChatUnread(true);
     } else if (message.type === "chat_error") {
       notify(message.data.message || "Не удалось отправить сообщение");
     }
@@ -473,12 +475,31 @@
     el["chat-input"].value = "";
   }
 
+  function isChatVisible() {
+    return joined && el["room-content"].classList.contains(mobileLayout.matches ? "chat-active" : "chat-open");
+  }
+
+  function setChatUnread(unread) {
+    for (const id of ["chat-toggle", "chat-tab"]) {
+      el[id].classList.toggle("chat-unread", unread);
+      if (unread) el[id].setAttribute("aria-label", "Чат: новые сообщения");
+      else el[id].removeAttribute("aria-label");
+    }
+  }
+
+  mobileLayout.addEventListener("change", () => {
+    if (isChatVisible()) setChatUnread(false);
+  });
+
   function setRoomTab(tab) {
     const chatActive = tab === "chat";
     el["room-content"].classList.toggle("chat-active", chatActive);
     el["video-tab"].setAttribute("aria-pressed", String(!chatActive));
     el["chat-tab"].setAttribute("aria-pressed", String(chatActive));
-    if (chatActive) el["chat-input"].focus();
+    if (chatActive) {
+      if (isChatVisible()) setChatUnread(false);
+      el["chat-input"].focus();
+    }
   }
 
   function toggleChat() {
@@ -486,7 +507,10 @@
     el["room-content"].classList.toggle("chat-open", chatOpen);
     el["chat-toggle"].setAttribute("aria-expanded", String(chatOpen));
     el["chat-toggle"].textContent = chatOpen ? "✕ Скрыть чат" : "💬 Чат";
-    if (chatOpen) el["chat-input"].focus();
+    if (chatOpen) {
+      if (isChatVisible()) setChatUnread(false);
+      el["chat-input"].focus();
+    }
   }
 
   async function join() {
@@ -575,6 +599,7 @@
     busy = false;
     joined = false;
     localPeerID = "";
+    setChatUnread(false);
     el["room-content"].classList.remove("chat-open");
     el["chat-toggle"].setAttribute("aria-expanded", "false");
     el["chat-toggle"].textContent = "💬 Чат";

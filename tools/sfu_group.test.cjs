@@ -19,6 +19,16 @@ async function stats(page) {
   });
 }
 
+async function expectChatUnread(page, unread) {
+  await page.waitForFunction((expected) => ["chat-toggle", "chat-tab"].every((id) =>
+    document.getElementById(id).classList.contains("chat-unread") === expected), unread);
+}
+
+async function sendChat(page, text) {
+  await page.locator("#chat-input").fill(text);
+  await page.locator("#chat-input").press("Enter");
+}
+
 async function expectGroupMedia(pages, remoteCount = 3) {
   for (const page of pages) {
     await page.waitForFunction((count) => {
@@ -114,6 +124,39 @@ test("SFU group: late join, camera replacement, bitrate, screen, mute, leave and
     await expectGroupMedia(pages);
 
     const mobile = pages[3];
+    await pages[0].locator("#chat-toggle").click();
+    await sendChat(pages[0], "First unread message");
+    for (const page of pages) await page.waitForFunction(() => document.querySelectorAll(".chat-message").length === 1);
+    await expectChatUnread(pages[0], false);
+    for (const page of pages.slice(1)) await expectChatUnread(page, true);
+    for (const [page, id] of [[pages[1], "chat-toggle"], [mobile, "chat-tab"]]) {
+      await page.waitForFunction((buttonId) => getComputedStyle(document.getElementById(buttonId)).backgroundColor === "rgb(251, 191, 36)", id);
+    }
+    await pages[1].locator("#chat-toggle").click();
+    await mobile.locator("#chat-tab").click();
+    await expectChatUnread(pages[1], false);
+    await expectChatUnread(mobile, false);
+    await sendChat(pages[0], "Message with chat open");
+    for (const page of pages) await page.waitForFunction(() => document.querySelectorAll(".chat-message").length === 2);
+    await expectChatUnread(pages[1], false);
+    await expectChatUnread(mobile, false);
+    await pages[1].locator("#chat-toggle").click();
+    await mobile.locator("#video-tab").click();
+    await sendChat(pages[0], "Another unread message");
+    await expectChatUnread(pages[1], true);
+    await expectChatUnread(mobile, true);
+    await mobile.setViewportSize({ width: 1000, height: 844 });
+    await expectChatUnread(mobile, true);
+    await mobile.locator("#chat-toggle").click();
+    await expectChatUnread(mobile, false);
+    await mobile.setViewportSize({ width: 390, height: 844 });
+    await sendChat(pages[0], "Mobile chat hidden despite desktop panel being open");
+    await expectChatUnread(mobile, true);
+    await mobile.locator("#chat-tab").click();
+    await expectChatUnread(mobile, false);
+    await mobile.locator("#video-tab").click();
+    await pages[0].locator("#chat-toggle").click();
+
     await mobile.locator("#settings").click();
     const cameraId = await mobile.evaluate(() => window.testConnections.at(-1).getSenders().find((sender) => sender.track?.kind === "video").track.id);
     const deviceId = await mobile.locator("#video-input").inputValue();
@@ -139,9 +182,12 @@ test("SFU group: late join, camera replacement, bitrate, screen, mute, leave and
     await expectGroupMedia(pages);
 
     await pages[1].locator("#leave").click();
+    await expectChatUnread(pages[1], false);
     await expectGroupMedia([pages[0], pages[2], pages[3]], 2);
     await pages[1].locator("#join").click();
     await pages[1].waitForFunction(() => window.testConnections.at(-1)?.connectionState === "connected");
+    await pages[1].waitForFunction(() => document.querySelectorAll(".chat-message").length === 4);
+    await expectChatUnread(pages[1], false);
     await expectGroupMedia(pages);
     await mobile.evaluate(() => {
       const acquire = navigator.mediaDevices.getUserMedia;
