@@ -11,7 +11,7 @@ import (
 	"github.com/pion/turn/v5"
 
 	"github.com/qrave1/sozvon/internal/config"
-	"github.com/qrave1/sozvon/internal/logger"
+	"github.com/qrave1/sozvon/internal/turn/logger"
 )
 
 func Start(cfg *config.Config) error {

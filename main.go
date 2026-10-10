@@ -13,7 +13,7 @@ import (
 
 	"github.com/qrave1/sozvon/internal/config"
 	"github.com/qrave1/sozvon/internal/sfu"
-	"github.com/qrave1/sozvon/internal/turnserver"
+	"github.com/qrave1/sozvon/internal/turn"
 )
 
 func main() {
@@ -56,16 +56,16 @@ func noCache(next http.Handler) http.Handler {
 }
 
 func runServer(cfg *config.Config) error {
-	publicIP := cfg.SFUPublicIP
+	publicIP := cfg.Media.PublicIP
 	if publicIP == "" {
 		publicIP = cfg.TURN.RelayIP
 	}
-	sfuServer, err := sfu.NewServerWithUDP(cfg.SFUUDPPort, publicIP)
+	sfuServer, err := sfu.NewServerWithUDP(cfg.Media.UDPPort, publicIP)
 	if err != nil {
 		return err
 	}
 	defer sfuServer.Close()
-	slog.Info("SFU UDP listener started", "port", cfg.SFUUDPPort, "public_ip", publicIP)
+	slog.Info("media UDP listener started", "port", cfg.Media.UDPPort, "public_ip", publicIP)
 	slog.Info("server started", "port", cfg.HTTP.Port)
 	return http.ListenAndServe(cfg.HTTP.Port, newHandler(cfg, sfuServer))
 }

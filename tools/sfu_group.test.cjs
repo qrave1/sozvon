@@ -56,7 +56,7 @@ async function expectGroupMedia(pages, remoteCount = 3) {
 test("Group call: late join, camera replacement, bitrate, screen, mute, leave and rejoin", { timeout: 120000 }, async () => {
   const server = spawn(process.env.SFU_TEST_BINARY || path.join(root, ".sfu-check.exe"), [], {
     cwd: root, windowsHide: true,
-    env: { ...process.env, PORT: `:${port}`, SFU_UDP_PORT: "40003", SFU_PUBLIC_IP: "", TURN_RELAY_IP: "", TURN_ENABLED: "false" },
+    env: { ...process.env, PORT: `:${port}`, MEDIA_UDP_PORT: "40003", MEDIA_PUBLIC_IP: "", TURN_RELAY_IP: "" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let serverLogs = "";
