@@ -1,1336 +1,911 @@
-function callApp() {
+(() => {
   "use strict";
 
-  const ICE_SERVERS = [
-    { urls: "stun:stun.l.google.com:19302" },
-  ];
-
-  const COLORS = [
-    "#e74c3c", "#3498db", "#2ecc71", "#9b59b6", "#f1c40f",
-    "#1abc9c", "#e67e22", "#34495e", "#fd79a8", "#00cec9",
-  ];
-
-  const MAX_RECONNECT_ATTEMPTS = 5;
-  const RECONNECT_BASE_DELAY_MS = 1000;
-  const RECONNECT_MAX_DELAY_MS = 15000;
   const PREFS_KEY = "sozvon.prefs";
-  const SPOTLIGHT_ENABLED = true;
-
-  function loadPrefs() {
-    try {
-      return JSON.parse(localStorage.getItem(PREFS_KEY)) || {};
-    } catch {
-      return {};
-    }
-  }
-
-  function savePrefs(prefs) {
-    try {
-      localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
-    } catch {}
-  }
-
-  function getRoomFromUrl() {
-    const urlParams = new URLSearchParams(window.location.search);
-    return urlParams.get('room') || urlParams.get('id') || '';
-  }
-
-  function colorFor(id) {
-    let h = 0;
-    for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-    return COLORS[h % COLORS.length];
-  }
-
-  function isValidColor(c) {
-    return typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c);
-  }
-
-  function setVideoBitrate(sender, bitrate) {
-    const params = sender.getParameters();
-    if (!params.encodings) params.encodings = [{}];
-    params.encodings.forEach((e) => { e.maxBitrate = bitrate; });
-    sender.setParameters(params).catch(() => {});
-  }
-
-  const BITRATE_PRESETS = {
+  const COLORS = ["#e74c3c", "#3498db", "#2ecc71", "#9b59b6", "#f1c40f", "#1abc9c", "#e67e22", "#34495e", "#fd79a8", "#00cec9"];
+  const BITRATES = {
     low: { cam: 500000, screen: 1500000 },
     medium: { cam: 2000000, screen: 4000000 },
     high: { cam: 8000000, screen: 16000000 },
   };
+  const el = Object.fromEntries([
+    "name", "room", "join", "leave", "welcome", "mic", "cam", "screen", "share", "chat-toggle", "settings", "status",
+    "device-bar", "audio-input", "audio-output", "video-input", "color", "bitrate", "videos", "toast",
+    "room-content", "room-tabs", "video-tab", "chat-tab", "chat-panel", "chat-messages", "chat-form", "chat-input",
+  ].map((id) => [id, document.getElementById(id)]));
 
-  function bitrateFor(pref, screen) {
-    const p = BITRATE_PRESETS[pref] || BITRATE_PRESETS.medium;
-    return screen ? p.screen : p.cam;
-  }
-
-  let audioCtx = null;
-  let speakTimer = null;
-  let notifyTimer = null;
-  let netTimer = null;
+  let pc = null;
+  let ws = null;
+  let localStream = null;
+  let screenStream = null;
+  let cameraTrack = null;
+  let joined = false;
+  let busy = false;
+  let micOn = true;
+  let camOn = false;
+  let activeId = null;
+  let localPeerID = "";
+  let attempt = 0;
+  let messageQueue = Promise.resolve();
+  let joinSent = false;
+  const mobileLayout = window.matchMedia("(max-width: 600px)");
+  const localCandidates = [];
+  const remoteCandidates = [];
+  let audioContext = null;
+  let speakingTimer = null;
+  let noticeTimer = null;
+  let bitrateUpdate = Promise.resolve();
+  let videoDeviceUpdate = Promise.resolve();
+  const localSenders = { audio: null, video: null };
+  const remoteStreams = new Map();
+  const profiles = new Map();
+  const mutedPeers = new Set();
+  const peerVolumes = new Map();
   const analysers = new Map();
 
-  return {
-    name: "",
-    room: "",
-    status: "не подключено",
-    connected: false,
-    micOn: true,
-    camOn: false,
-    localStream: null,
-    myColor: "#3498db",
-    prefColor: "",
-    colors: [
-      "#e74c3c", "#3498db", "#2ecc71", "#9b59b6", "#f1c40f",
-      "#1abc9c", "#e67e22", "#34495e", "#fd79a8", "#00cec9",
-    ],
-    colorNames: {
-      "#e74c3c": "Красный",
-      "#3498db": "Синий",
-      "#2ecc71": "Зелёный",
-      "#9b59b6": "Фиолетовый",
-      "#f1c40f": "Жёлтый",
-      "#1abc9c": "Бирюзовый",
-      "#e67e22": "Оранжевый",
-      "#34495e": "Тёмно-серый",
-      "#fd79a8": "Розовый",
-      "#00cec9": "Аква",
-    },
-    initial: "Я",
-    peers: [],
+  function loadPeerVolumes() {
+    try {
+      const stored = JSON.parse(localStorage.getItem("sozvon.peerVolumes") || localStorage.getItem("sozvon.sfu.peerVolumes")) || {};
+      for (const [id, value] of Object.entries(stored)) {
+        if (Number.isFinite(value)) peerVolumes.set(id, Math.max(0, Math.min(1, value)));
+      }
+    } catch { /* Storage can be unavailable in private mode. */ }
+  }
 
-    ws: null,
-    myId: null,
-    connecting: false,
-    connectionToken: 0,
-    iceServers: ICE_SERVERS,
-    pcs: new Map(),
-    mutedPeers: new Set(),
-    pendingIce: new Map(),
-    pendingConnectReject: null,
-    statsPrev: new Map(),
-    reconnectAttempts: 0,
-    reconnectTimer: null,
-    codecPref: "auto",
-    bitratePref: "medium",
+  function savePeerVolumes() {
+    try { localStorage.setItem("sozvon.peerVolumes", JSON.stringify(Object.fromEntries(peerVolumes))); }
+    catch { /* Storage can be unavailable in private mode. */ }
+  }
 
-    audioInputId: "",
-    audioOutputId: "",
-    videoId: "",
-    activeId: null,
-    showSettings: false,
-    screenShare: false,
-    screenStream: null,
-    _screenAudioTrack: null,
-    _savedMicTrack: null,
-    _camWasOn: false,
-    speaking: false,
-    spotManual: false,
-    devices: { audioinput: [], audiooutput: [], videoinput: [] },
-    audioOutputSupported: false,
+  function loadPrefs() {
+    try { return JSON.parse(localStorage.getItem(PREFS_KEY)) || {}; } catch { return {}; }
+  }
 
-    async init() {
-      const prefs = loadPrefs();
-      if (prefs.name) this.name = prefs.name;
-      if (prefs.codecPref) this.codecPref = prefs.codecPref;
-      if (prefs.bitratePref in BITRATE_PRESETS) this.bitratePref = prefs.bitratePref;
-      if (prefs.audioInputId) this.audioInputId = prefs.audioInputId;
-      if (prefs.audioOutputId) this.audioOutputId = prefs.audioOutputId;
-      if (prefs.videoId) this.videoId = prefs.videoId;
-      if (isValidColor(prefs.prefColor)) this.prefColor = prefs.prefColor;
-      this.room = getRoomFromUrl() || prefs.room || "";
+  function savePrefs() {
+    try {
+      localStorage.setItem(PREFS_KEY, JSON.stringify({
+        ...loadPrefs(), name: el.name.value, room: el.room.value,
+        audioInputId: el["audio-input"].value, audioOutputId: el["audio-output"].value,
+        videoId: el["video-input"].value, prefColor: el.color.value,
+        bitratePref: el.bitrate.value,
+      }));
+    } catch { /* Storage can be unavailable in private mode. */ }
+  }
 
-      ["name", "room", "codecPref", "bitratePref", "audioInputId", "audioOutputId", "videoId", "prefColor"].forEach((k) =>
-        this.$watch(k, () => this.persist())
-      );
-      this.$watch("prefColor", () => {
-        if (!this.camOn) this.updateColor();
-        if (this.connected) this.broadcastState();
-      });
-      this.updateColor();
+  function colorFor(id) {
+    let hash = 0;
+    for (const char of id) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+    return COLORS[hash % COLORS.length];
+  }
 
-      window.addEventListener("beforeunload", () => this.leave());
-      window.addEventListener("keydown", (e) => this.onKeydown(e));
-      this.audioOutputSupported =
-        typeof HTMLVideoElement !== "undefined" &&
-        typeof HTMLVideoElement.prototype.setSinkId === "function";
-      await this.enumerateDevices();
-      navigator.mediaDevices?.addEventListener("devicechange", () => {
-        this.enumerateDevices({ resetInvalid: true });
-      });
-    },
+  function profile() {
+    return {
+      name: el.name.value.trim().slice(0, 64), micOn, camOn,
+      screenShare: !!screenStream,
+      color: el.color.value || colorFor(el.name.value.trim() || "me"),
+    };
+  }
 
-    updateColor() {
-      this.myColor = this.prefColor || colorFor(this.name || "me");
-    },
+  function normalizeProfile(value) {
+    return {
+      name: value?.name || "", micOn: value?.micOn ?? true,
+      camOn: value?.camOn ?? true, screenShare: !!value?.screenShare,
+      color: /^#[0-9a-f]{6}$/i.test(value?.color || "") ? value.color : "",
+    };
+  }
 
-    persist() {
-      savePrefs({
-        name: this.name,
-        room: this.room,
-        codecPref: this.codecPref,
-        bitratePref: this.bitratePref,
-        audioInputId: this.audioInputId,
-        audioOutputId: this.audioOutputId,
-        videoId: this.videoId,
-        prefColor: this.prefColor,
-      });
-    },
+  function status(text) { el.status.textContent = text; }
 
-    onKeydown(e) {
-      if (e.repeat) return;
-      const tag = e.target?.tagName;
-      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
-      const k = e.key.toLowerCase();
-      if (k === "m" || k === "ь") this.toggleMic();
-      else if (k === "v" || k === "м") this.toggleCam();
-    },
+  function notify(text, duration = 3000) {
+    clearTimeout(noticeTimer);
+    status(text);
+    if (el.toast) {
+      el.toast.textContent = text;
+      el.toast.hidden = false;
+      el.toast.classList.remove("hidden");
+    }
+    noticeTimer = setTimeout(() => {
+      if (el.toast) { el.toast.hidden = true; el.toast.classList.add("hidden"); }
+      if (el.status.textContent === text) status(joined ? `В комнате: ${el.room.value}` : "Не подключено");
+    }, duration);
+  }
 
-    async enumerateDevices({ resetInvalid = false } = {}) {
-      if (!navigator.mediaDevices?.enumerateDevices) return;
-      try {
-        const all = await navigator.mediaDevices.enumerateDevices();
-        const grouped = { audioinput: [], audiooutput: [], videoinput: [] };
-        for (const d of all) {
-          if (d.kind in grouped) grouped[d.kind].push(d);
+  function updateControls() {
+    el.welcome.hidden = joined || busy;
+    el["room-content"].hidden = !joined;
+    el["room-tabs"].hidden = !joined;
+    el["chat-toggle"].hidden = !joined;
+    el.join.hidden = joined;
+    el.join.disabled = busy;
+    el.leave.hidden = !joined && !busy;
+    el.name.disabled = joined || busy;
+    el.room.disabled = joined || busy;
+    el.mic.disabled = !joined;
+    el.cam.disabled = !joined;
+    el.screen.hidden = !joined;
+    el.share.hidden = !joined;
+    el.mic.textContent = micOn ? "🎤 Микрофон" : "🔇 Микрофон";
+    el.cam.textContent = camOn ? "📹 Камера" : "🚫 Камера";
+    el.screen.textContent = screenStream ? "🖥 Экран: вкл" : "🖥 Экран";
+    el.mic.setAttribute("aria-pressed", String(!micOn));
+    el.cam.setAttribute("aria-pressed", String(!camOn));
+    el.screen.setAttribute("aria-pressed", String(!!screenStream));
+  }
+
+  function renderTile(id) {
+    let tile = document.getElementById(`tile-${id}`);
+    if (!tile) {
+      tile = document.createElement("div");
+      tile.className = "tile group relative overflow-hidden rounded-2xl border border-line bg-slate-950 shadow-lg transition duration-200 hover:border-slate-500";
+      tile.id = `tile-${id}`;
+      const video = document.createElement("video");
+      video.autoplay = true;
+      video.playsInline = true;
+      const audio = document.createElement("audio");
+      audio.autoplay = true;
+      const avatar = document.createElement("div");
+      avatar.className = "avatar text-5xl font-bold";
+      const label = document.createElement("div");
+      label.className = "label rounded-lg border border-white/10 bg-slate-950/75 px-2 py-1 text-xs font-medium text-white backdrop-blur";
+      const badge = document.createElement("div");
+      badge.className = "badge rounded-lg border border-indigo-300/20 bg-indigo-950/80 px-2 py-1 text-[11px] font-medium text-indigo-100 backdrop-blur";
+      const mute = document.createElement("button");
+      mute.className = "peer-mute rounded-lg border border-white/10 bg-slate-950/75 px-2 py-1 text-xs text-white opacity-0 backdrop-blur transition group-hover:opacity-100";
+      mute.onclick = (event) => {
+        event.stopPropagation();
+        if (mutedPeers.has(id)) mutedPeers.delete(id); else mutedPeers.add(id);
+        renderTile(id);
+      };
+      const volume = document.createElement("input");
+      volume.type = "range";
+      volume.min = "0";
+      volume.max = "100";
+      volume.step = "1";
+      volume.className = "peer-volume";
+      volume.title = "Громкость участника для вас";
+      volume.setAttribute("aria-label", "Громкость участника для вас");
+      volume.onclick = (event) => event.stopPropagation();
+      volume.oninput = (event) => {
+        event.stopPropagation();
+        const value = Number(volume.value) / 100;
+        peerVolumes.set(id, value);
+        audio.volume = value;
+        volume.setAttribute("aria-valuetext", `${volume.value}%`);
+        savePeerVolumes();
+      };
+      const fullscreen = document.createElement("button");
+      fullscreen.className = "peer-fullscreen rounded-lg border border-white/10 bg-slate-950/75 px-2 py-1 text-xs text-white opacity-0 backdrop-blur transition group-hover:opacity-100";
+      fullscreen.textContent = "⛶";
+      fullscreen.title = "Во весь экран";
+      fullscreen.setAttribute("aria-label", "Во весь экран");
+      fullscreen.onclick = (event) => {
+        event.stopPropagation();
+        if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+        else tile.requestFullscreen?.().catch(() => {});
+      };
+      tile.onclick = () => {
+        activeId = activeId === id ? null : id;
+        el.videos.classList.toggle("spotlight", !!activeId);
+        for (const item of el.videos.children) item.classList.toggle("active-lg", item.id === `tile-${activeId}`);
+      };
+      tile.append(video, audio, avatar, mute, volume, badge, fullscreen, label);
+      el.videos.append(tile);
+    }
+
+    const own = id === "local";
+    const info = own ? profile() : normalizeProfile(profiles.get(id));
+    const stream = own ? (screenStream || localStream) : remoteStreams.get(id);
+    const video = tile.querySelector("video");
+    const audio = tile.querySelector("audio");
+    const hasVideo = !!stream?.getVideoTracks().length && (info.camOn || info.screenShare);
+    video.muted = true;
+    audio.muted = own || mutedPeers.has(id);
+    const peerVolume = peerVolumes.get(id) ?? 1;
+    audio.volume = peerVolume;
+    const volume = tile.querySelector(".peer-volume");
+    volume.hidden = own;
+    volume.value = String(Math.round(peerVolume * 100));
+    volume.setAttribute("aria-valuetext", `${volume.value}%`);
+    if (video.srcObject !== stream) {
+      video.srcObject = stream || null;
+      if (stream) video.play().catch(() => {});
+    }
+    const audioStream = !own && stream?.getAudioTracks().length ? stream : null;
+    if (audio.srcObject !== audioStream) audio.srcObject = audioStream;
+    if (audioStream) audio.play().catch(() => {});
+    if (!own && el["audio-output"].value) audio.setSinkId?.(el["audio-output"].value).catch(() => {});
+    video.hidden = !hasVideo;
+    const avatar = tile.querySelector(".avatar");
+    avatar.hidden = hasVideo;
+    avatar.style.background = info.color || colorFor(info.name || id);
+    avatar.textContent = (info.name || (own ? "Я" : id)).slice(0, 1).toUpperCase();
+    tile.querySelector(".label").textContent = `${info.name || (own ? "Я" : id.slice(0, 8))}${info.micOn ? "" : " 🔇"}`;
+    const badge = tile.querySelector(".badge");
+    badge.textContent = info.screenShare ? "Экран" : "";
+    badge.hidden = !info.screenShare;
+    const mute = tile.querySelector(".peer-mute");
+    mute.hidden = own;
+    mute.textContent = mutedPeers.has(id) ? "🔇" : "🔊";
+    mute.title = mutedPeers.has(id) ? "Включить звук для себя" : "Выключить звук для себя";
+    mute.setAttribute("aria-label", mute.title);
+    tile.querySelector(".peer-fullscreen").hidden = !hasVideo;
+  }
+
+  function removePeer(id) {
+    profiles.delete(id);
+    remoteStreams.delete(id);
+    mutedPeers.delete(id);
+    stopAnalysis(id);
+    document.getElementById(`tile-${id}`)?.remove();
+    if (activeId === id) {
+      activeId = null;
+      el.videos.classList.remove("spotlight");
+    }
+  }
+
+  function stopAnalysis(id) {
+    analysers.get(id)?.source.disconnect();
+    analysers.delete(id);
+  }
+
+  function analyzeAudio(id, stream) {
+    if (!stream?.getAudioTracks().length || analysers.has(id)) return;
+    try {
+      const Context = window.AudioContext || window.webkitAudioContext;
+      if (!Context) return;
+      audioContext ||= new Context();
+      audioContext.resume().catch(() => {});
+      const source = audioContext.createMediaStreamSource(stream);
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 512;
+      source.connect(analyser);
+      analysers.set(id, { source, analyser, data: new Float32Array(analyser.fftSize), lastActive: 0 });
+      speakingTimer ||= setInterval(() => {
+        const now = Date.now();
+        for (const [peerId, entry] of analysers) {
+          entry.analyser.getFloatTimeDomainData(entry.data);
+          let power = 0;
+          for (const sample of entry.data) power += sample * sample;
+          if (Math.sqrt(power / entry.data.length) > 0.03) entry.lastActive = now;
+          document.getElementById(`tile-${peerId}`)?.classList.toggle("speaking", now - entry.lastActive < 900);
         }
-        this.devices = grouped;
+      }, 250);
+    } catch (error) { console.warn("audio analysis failed", error); }
+  }
 
-        const selectDevice = (current, list) => {
-          const exists = list.some((d) => d.deviceId === current);
-          return exists || (!resetInvalid && current) ? current : (list[0]?.deviceId || "");
-        };
-        this.audioInputId = selectDevice(this.audioInputId, grouped.audioinput);
-        this.audioOutputId = selectDevice(this.audioOutputId, grouped.audiooutput);
-        this.videoId = selectDevice(this.videoId, grouped.videoinput);
-      } catch (err) {
-        console.warn("не удалось получить список устройств", err);
-      }
-    },
+  function onTrack(event) {
+    const stream = event.streams[0];
+    const id = stream?.id;
+    if (!id) return;
+    const refresh = () => {
+      if (remoteStreams.get(id) !== stream) return;
+      stopAnalysis(id);
+      analyzeAudio(id, stream);
+      renderTile(id);
+    };
+    if (remoteStreams.get(id) !== stream) {
+      remoteStreams.set(id, stream);
+      stream.addEventListener("addtrack", refresh);
+      stream.addEventListener("removetrack", refresh);
+    }
+    event.track.addEventListener("unmute", refresh);
+    event.track.addEventListener("ended", () => {
+      if (remoteStreams.get(id) !== stream) return;
+      stream.removeTrack(event.track);
+      refresh();
+    });
+    refresh();
+  }
 
-    async loadIceServers() {
-      try {
-        const res = await fetch("/turn-config");
-        const cfg = await res.json();
-        const servers = [{ urls: "stun:stun.l.google.com:19302" }];
-        if (cfg.urls) {
-          servers.push({
-            urls: cfg.urls,
-            username: cfg.username,
-            credential: cfg.credential,
-          });
+  async function enumerateDevices() {
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const selections = { audioinput: el["audio-input"], audiooutput: el["audio-output"], videoinput: el["video-input"] };
+      for (const [kind, select] of Object.entries(selections)) {
+        const selected = select.value;
+        select.replaceChildren();
+        for (const device of devices.filter((item) => item.kind === kind)) {
+          const option = document.createElement("option");
+          option.value = device.deviceId;
+          option.textContent = device.label || `${kind === "videoinput" ? "Камера" : kind === "audiooutput" ? "Аудиовыход" : "Микрофон"} ${select.length + 1}`;
+          select.append(option);
         }
-        this.iceServers = servers;
-      } catch (err) {
-        console.warn("failed to load TURN config, using STUN only", err);
+        if ([...select.options].some((option) => option.value === selected)) select.value = selected;
+        select.disabled = !select.length || (kind === "audiooutput" && typeof HTMLMediaElement.prototype.setSinkId !== "function");
       }
-    },
+    } catch (error) { console.warn("device enumeration failed", error); }
+  }
 
-    attachStream(id, stream) {
-      this.$nextTick(() => {
-        const video = document.getElementById("vid-" + id);
-        if (video && stream) {
-          video.srcObject = stream;
-          if (this.mutedPeers.has(id)) this.setRemoteMuted(id, true);
-          this.applyAudioOutput();
-        }
-      });
-    },
+  function applyAudioOutput() {
+    if (!el["audio-output"].value) return;
+    for (const audio of el.videos.querySelectorAll("audio")) audio.setSinkId?.(el["audio-output"].value).catch(() => {});
+  }
 
-    queueIce(id, candidate) {
-      if (!this.pendingIce.has(id)) this.pendingIce.set(id, []);
-      this.pendingIce.get(id).push(candidate);
-    },
-
-    async flushIceQueue(id) {
-      const queue = this.pendingIce.get(id);
-      if (!queue) return;
-      this.pendingIce.delete(id);
-      const pc = this.pcs.get(id);
-      if (!pc) return;
-      const results = await Promise.allSettled(
-        queue.map((c) => pc.addIceCandidate(new RTCIceCandidate(c)))
-      );
-      for (const result of results) {
-        if (result.status === "rejected") {
-          console.error("addIceCandidate failed", result.reason);
-        }
+  async function loadIceServers() {
+    const servers = [{ urls: "stun:stun.l.google.com:19302" }];
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000);
+    try {
+      const response = await fetch("/turn-config", { signal: controller.signal });
+      if (response.ok) {
+        const config = await response.json();
+        if (config.urls) servers.push({ urls: config.urls, username: config.username, credential: config.credential });
       }
-    },
+    } catch (error) { console.warn("TURN config unavailable", error); }
+    finally { clearTimeout(timeout); }
+    return servers;
+  }
 
-    setRemoteMuted(id, muted) {
-      const video = document.getElementById("vid-" + id);
-      if (!video?.srcObject) return;
-      video.srcObject.getAudioTracks().forEach((t) => (t.enabled = !muted));
-    },
+  async function acquireTrack(kind) {
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error("Камера и микрофон доступны только через HTTPS");
+    const select = kind === "audio" ? el["audio-input"] : el["video-input"];
+    const constraints = { [kind]: select.value ? { deviceId: { exact: select.value } } : true };
+    const token = attempt;
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia(constraints); }
+    catch { stream = await navigator.mediaDevices.getUserMedia({ [kind]: true }); }
+    if (token !== attempt) {
+      stream.getTracks().forEach((track) => track.stop());
+      throw new Error("Соединение закрыто");
+    }
+    return stream.getTracks().find((track) => track.kind === kind);
+  }
 
-    toggleMuteUser(id) {
-      if (this.mutedPeers.has(id)) {
-        this.mutedPeers.delete(id);
-        this.setRemoteMuted(id, false);
-      } else {
-        this.mutedPeers.add(id);
-        this.setRemoteMuted(id, true);
+  async function startMedia() {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      notify("Камера и микрофон доступны только через HTTPS", 6000);
+      return new MediaStream();
+    }
+    const audio = el["audio-input"].value ? { deviceId: { exact: el["audio-input"].value } } : true;
+    const video = el["video-input"].value ? { deviceId: { exact: el["video-input"].value } } : true;
+    let media;
+    try { media = await navigator.mediaDevices.getUserMedia({ audio, video }); }
+    catch {
+      try { media = await navigator.mediaDevices.getUserMedia({ audio }); }
+      catch {
+        try { media = await navigator.mediaDevices.getUserMedia({ video }); }
+        catch { media = new MediaStream(); }
       }
-      const p = this.peers.find((x) => x.id === id);
-      if (p) p.muted = this.mutedPeers.has(id);
-    },
+    }
+    return media;
+  }
 
-    addPeer(id, info) {
-      if (!this.peers.find((p) => p.id === id)) {
-        this.peers.push({
-          id,
-          name: info?.name || "",
-          camOn: info?.camOn ?? true,
-          micOn: info?.micOn ?? true,
-          color: isValidColor(info?.color) ? info.color : colorFor(id),
-          initial: (info?.name || id).slice(0, 1).toUpperCase(),
-          mode: "",
-          muted: this.mutedPeers.has(id),
-          speaking: false,
-          rtt: null,
-          level: "",
-        });
+  function videoSender() {
+    return localSenders.video;
+  }
+
+  function applyBitrate() {
+    const connection = pc;
+    const sender = videoSender();
+    if (!connection || !sender?.track) return Promise.resolve();
+    bitrateUpdate = bitrateUpdate.catch(() => {}).then(async () => {
+      if (pc !== connection || sender.track?.kind !== "video") return;
+      const params = sender.getParameters();
+      if (!params.encodings?.length) return;
+      const preset = BITRATES[el.bitrate.value] || BITRATES.medium;
+      for (const encoding of params.encodings) encoding.maxBitrate = screenStream ? preset.screen : preset.cam;
+      await sender.setParameters(params);
+    });
+    return bitrateUpdate;
+  }
+
+  async function openWebSocket(url) {
+    const socket = new WebSocket(url);
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => fail(new Error("Тайм-аут WebSocket")), 10000);
+      function fail(error) { clearTimeout(timeout); socket.close(); reject(error); }
+      socket.onopen = () => { clearTimeout(timeout); resolve(); };
+      socket.onerror = () => fail(new Error("WebSocket недоступен"));
+    });
+    return socket;
+  }
+
+  async function handleMessage(message, token) {
+    if (token !== attempt || !pc || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const connection = pc;
+    const socket = ws;
+    if (message.type === "joined") {
+      await connection.setRemoteDescription(message.data.answer);
+      if (token !== attempt) return;
+      for (const candidate of remoteCandidates.splice(0)) await connection.addIceCandidate(candidate);
+      if (token !== attempt) return;
+      for (const id of message.data.peers || []) {
+        profiles.set(id, normalizeProfile(message.data.profiles?.[id]));
+        renderTile(id);
       }
-    },
+      localPeerID = message.data.id;
+      el["chat-messages"].replaceChildren();
+      for (const chatMessage of message.data.chatHistory || []) appendChatMessage(chatMessage);
+      joined = true;
+      busy = false;
+      document.title = `Sozvon - ${el.room.value}`;
+      updateControls();
+      status(pc.connectionState === "connected" ? `В комнате: ${el.room.value}` : "Подключение медиа...");
+    } else if (message.type === "peer_joined") {
+      profiles.set(message.data.id, normalizeProfile(message.data.profile));
+      renderTile(message.data.id);
+    } else if (message.type === "state") {
+      profiles.set(message.data.id, normalizeProfile(message.data.profile));
+      renderTile(message.data.id);
+    } else if (message.type === "peer_left") {
+      removePeer(message.data.id);
+    } else if (message.type === "offer") {
+      await connection.setRemoteDescription(message.data);
+      if (token !== attempt) return;
+      await connection.setLocalDescription(await connection.createAnswer());
+      if (token !== attempt) return;
+      socket.send(JSON.stringify({ type: "answer", data: connection.localDescription }));
+    } else if (message.type === "candidate") {
+      if (connection.remoteDescription) await connection.addIceCandidate(message.data);
+      else remoteCandidates.push(message.data);
+    } else if (message.type === "chat_message") {
+      appendChatMessage(message.data);
+      if (message.data.senderId !== localPeerID && !isChatVisible()) setChatUnread(true);
+    } else if (message.type === "chat_error") {
+      notify(message.data.message || "Не удалось отправить сообщение");
+    }
+  }
 
-    removePeer(id) {
-      this.peers = this.peers.filter((p) => p.id !== id);
-      this.mutedPeers.delete(id);
-      this.pendingIce.delete(id);
-      this.stopAudioAnalysis(id);
-      for (const k of [...this.statsPrev.keys()]) {
-        if (k.startsWith(id + ":")) this.statsPrev.delete(k);
-      }
-      const pc = this.pcs.get(id);
-      if (pc) {
-        pc.close();
-        this.pcs.delete(id);
-      }
-    },
+  function appendChatMessage(message) {
+    const article = document.createElement("article");
+    article.className = `chat-message${message.senderId === localPeerID ? " own" : ""}`;
+    const header = document.createElement("header");
+    const name = document.createElement("strong");
+    name.textContent = message.name || "Участник";
+    if (/^#[0-9a-f]{6}$/i.test(message.color || "")) name.style.color = message.color;
+    const time = document.createElement("time");
+    const date = new Date(message.sentAt);
+    time.dateTime = date.toISOString();
+    time.textContent = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    header.append(name, time);
+    const text = document.createElement("div");
+    text.className = "text-sm text-slate-200";
+    text.textContent = message.text;
+    article.append(header, text);
+    el["chat-messages"].append(article);
+    el["chat-messages"].scrollTop = el["chat-messages"].scrollHeight;
+  }
 
-    setPeerMode(id, mode) {
-      const p = this.peers.find((x) => x.id === id);
-      if (p) p.mode = mode;
-    },
+  function sendChatMessage(event) {
+    event.preventDefault();
+    const text = el["chat-input"].value.trim();
+    if (!text || !joined || ws?.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: "chat_send", data: { text } }));
+    el["chat-input"].value = "";
+  }
 
-    updatePeer(id, patch) {
-      const p = this.peers.find((x) => x.id === id);
-      if (!p) return;
-      if (patch.color !== undefined && !isValidColor(patch.color)) delete patch.color;
-      Object.assign(p, patch);
-      if (patch.name) p.initial = patch.name.slice(0, 1).toUpperCase();
-    },
+  function isChatVisible() {
+    return joined && el["room-content"].classList.contains(mobileLayout.matches ? "chat-active" : "chat-open");
+  }
 
-    applyVideoRestrictions(pc) {
-      if (!pc.getTransceivers) return;
-      for (const tr of pc.getTransceivers()) {
-        if (tr.sender?.track?.kind !== "video") continue;
-        setVideoBitrate(tr.sender, bitrateFor(this.bitratePref, this.screenShare));
-      }
-    },
+  function setChatUnread(unread) {
+    for (const id of ["chat-toggle", "chat-tab"]) {
+      el[id].classList.toggle("chat-unread", unread);
+      if (unread) el[id].setAttribute("aria-label", "Чат: новые сообщения");
+      else el[id].removeAttribute("aria-label");
+    }
+  }
 
-    applyVideoCodecPrefs(pc) {
-      if (!pc.getTransceivers) return;
-      const caps = RTCRtpSender.getCapabilities?.("video") || RTCRtpReceiver.getCapabilities?.("video");
-      if (!caps?.codecs?.length) return;
-      const wanted = (this.codecPref || "").toLowerCase();
-      let codecs = caps.codecs.slice();
-      if (wanted && wanted !== "auto") {
-        codecs.sort((a, b) => {
-          const aHit = a.mimeType.toLowerCase().includes(wanted);
-          const bHit = b.mimeType.toLowerCase().includes(wanted);
-          return (bHit ? 1 : 0) - (aHit ? 1 : 0);
-        });
-      }
-      for (const tr of pc.getTransceivers()) {
-        if (tr.sender?.track?.kind !== "video") continue;
-        try { tr.setCodecPreferences(codecs); } catch (_) {}
-      }
-    },
+  mobileLayout.addEventListener("change", () => {
+    if (isChatVisible()) setChatUnread(false);
+  });
 
-    changeCodec() {
-      for (const [peerId, pc] of this.pcs) {
-        this.applyVideoCodecPrefs(pc);
-        if (this.connected) this.makeOffer(peerId, pc);
-      }
-    },
+  function setRoomTab(tab) {
+    const chatActive = tab === "chat";
+    el["room-content"].classList.toggle("chat-active", chatActive);
+    el["video-tab"].setAttribute("aria-pressed", String(!chatActive));
+    el["chat-tab"].setAttribute("aria-pressed", String(chatActive));
+    if (chatActive) {
+      if (isChatVisible()) setChatUnread(false);
+      el["chat-input"].focus();
+    }
+  }
 
-    async makeOffer(peerId, pc) {
-      try {
-        pc._makingOffer = true;
-        await pc.setLocalDescription();
-        this.send({ type: "offer", to: peerId, data: pc.localDescription });
-      } catch (err) {
-        console.error("offer failed", err);
-      } finally {
-        pc._makingOffer = false;
-      }
-    },
+  function toggleChat() {
+    const chatOpen = !el["room-content"].classList.contains("chat-open");
+    el["room-content"].classList.toggle("chat-open", chatOpen);
+    el["chat-toggle"].setAttribute("aria-expanded", String(chatOpen));
+    el["chat-toggle"].textContent = chatOpen ? "✕ Скрыть чат" : "💬 Чат";
+    if (chatOpen) {
+      if (isChatVisible()) setChatUnread(false);
+      el["chat-input"].focus();
+    }
+  }
 
-    applyVideoBitrate() {
-      const bitrate = bitrateFor(this.bitratePref, this.screenShare);
-      for (const pc of this.pcs.values()) {
-        const sender = pc.getSenders().find((s) => s.track?.kind === "video");
-        if (sender) setVideoBitrate(sender, bitrate);
-      }
-    },
-
-    async replaceOrAddTrack(pc, kind, track) {
-      if (!pc || pc.connectionState === "closed") return;
-
-      let sender = pc.getSenders().find((s) => s.track?.kind === kind);
-      if (!sender && pc.getTransceivers) {
-        const transceiver = pc.getTransceivers().find((tr) =>
-          tr.sender?.track?.kind === kind || tr.receiver?.track?.kind === kind
-        );
-        sender = transceiver?.sender || null;
-      }
-
-      if (sender) {
-        await sender.replaceTrack(track);
-      } else if (track && this.localStream) {
-        pc.addTrack(track, this.localStream);
-      }
-    },
-
-    createPeer(peerId, initiator) {
-      const pc = new RTCPeerConnection({
-        iceServers: this.iceServers,
-        bundlePolicy: "max-bundle",
-      });
-      pc._polite = !initiator;
-      pc._makingOffer = false;
-      pc._ignoreOffer = false;
-
-      if (this.localStream) {
-        for (const track of this.localStream.getTracks()) {
-          pc.addTrack(track, this.localStream);
-        }
-      }
-
-      this.applyVideoRestrictions(pc);
-      this.applyVideoCodecPrefs(pc);
-
-      pc.onicecandidate = (e) => {
-        if (e.candidate) {
-          this.send({ type: "candidate", to: peerId, data: e.candidate });
+  async function join() {
+    const room = el.room.value.trim();
+    if (!room || pc || busy) { if (!room) notify("Введите ID комнаты"); return; }
+    el.room.value = room;
+    savePrefs();
+    const url = new URL(location.href);
+    url.searchParams.set("room", room);
+    history.replaceState(null, "", url);
+    const token = ++attempt;
+    joinSent = false;
+    localCandidates.length = 0;
+    remoteCandidates.length = 0;
+    busy = true;
+    updateControls();
+    status("Запрос камеры и микрофона...");
+    try {
+      const media = await startMedia();
+      if (token !== attempt) { media.getTracks().forEach((track) => track.stop()); return; }
+      localStream = media;
+      cameraTrack = media.getVideoTracks()[0] || null;
+      for (const track of media.getAudioTracks()) track.enabled = micOn;
+      if (cameraTrack) cameraTrack.enabled = camOn;
+      await enumerateDevices();
+      if (token !== attempt) return;
+      renderTile("local");
+      analyzeAudio("local", media);
+      status("Поиск сетевого маршрута...");
+      const iceServers = await loadIceServers();
+      if (token !== attempt) return;
+      pc = new RTCPeerConnection({ iceServers, bundlePolicy: "max-bundle" });
+      pc.ontrack = (event) => { if (token === attempt) onTrack(event); };
+      pc.onicecandidate = (event) => {
+        if (!event.candidate || token !== attempt) return;
+        const candidate = event.candidate.toJSON();
+        if (joinSent && ws?.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "candidate", data: candidate }));
+        } else {
+          localCandidates.push(candidate);
         }
       };
-
-      pc.ontrack = (e) => {
-        const [stream] = e.streams;
-        this.attachStream(peerId, stream);
-        this.setupAudioAnalysis(peerId, stream);
+      pc.onconnectionstatechange = () => {
+        if (!pc || token !== attempt) return;
+        if (pc.connectionState === "connected") status(`В комнате: ${room}`);
+        else if (pc.connectionState === "failed") status("Медиасоединение не установлено");
+        else if (joined && pc.connectionState === "disconnected") status("Медиасоединение прервано");
       };
-
-      pc.oniceconnectionstatechange = () => {
-        const state = pc.iceConnectionState;
-        if (state === "connected" || state === "completed") {
-          let mode = "direct";
-          const sel = pc.getReceivers()[0]?.transport?.getSelectedCandidatePair?.();
-          const local = sel?.local ?? pc.sctp?.transport?.getSelectedCandidatePair?.()?.local;
-          if (local && local.candidateType === "relay") mode = "relay";
-          this.setPeerMode(peerId, mode);
-        } else if (state === "disconnected" || state === "failed") {
-          this.setPeerMode(peerId, "reconnecting...");
-          try { pc.restartIce(); } catch (err) { console.error("restart ice failed", err); }
-        }
-      };
-
-      this.pcs.set(peerId, pc);
-
-      pc.onnegotiationneeded = () => this.makeOffer(peerId, pc);
-
-      return pc;
-    },
-
-    async startMedia() {
-      if (!navigator.mediaDevices?.getUserMedia) {
-        this.notify("браузер не поддерживает захват камеры и микрофона");
-        return;
+      for (const kind of ["audio", "video"]) {
+        const track = localStream.getTracks().find((item) => item.kind === kind);
+        const transceiver = pc.addTransceiver(track || kind, { direction: "sendonly", streams: [localStream] });
+        localSenders[kind] = transceiver.sender;
       }
-
-      const stream = new MediaStream();
-
-      let combined = null;
-      try {
-        combined = await navigator.mediaDevices.getUserMedia({
-          video: this.videoId ? { deviceId: { exact: this.videoId } } : true,
-          audio: this.audioInputId ? { deviceId: { exact: this.audioInputId } } : true,
-        });
-      } catch (err) {
-        console.warn("совместный запрос медиа не удался", err);
-      }
-
-      if (combined) {
-        combined.getTracks().forEach((t) => stream.addTrack(t));
-      } else {
-        for (const kind of ["video", "audio"]) {
-          try {
-            stream.addTrack(await this.acquireTrack(kind));
-          } catch (err) {
-            if (kind === "video") this.camOn = false;
-            else this.micOn = false;
-            this.notify(kind === "video" ? "камера недоступна" : "микрофон недоступен");
-          }
-        }
-      }
-
-      if (!stream.getTracks().length) {
-        this.notify("не удалось получить доступ к камере и микрофону");
-        return;
-      }
-
-      this.localStream = stream;
-      await this.enumerateDevices({ resetInvalid: true });
-      stream.getVideoTracks().forEach((t) => (t.enabled = this.camOn));
-      stream.getAudioTracks().forEach((t) => (t.enabled = this.micOn));
-
-      this.myColor = this.prefColor || colorFor(this.name || "me");
-      this.initial = (this.name || "Я").slice(0, 1).toUpperCase();
-      this.setupAudioAnalysis("local", stream);
-
-      this.$nextTick(() => {
-        const v = document.getElementById("vid-local");
-        if (v) v.srcObject = stream;
-        this.applyAudioOutput();
-      });
-    },
-
-    applyAudioOutput() {
-      if (!this.audioOutputId || typeof HTMLVideoElement.prototype.setSinkId !== "function") return;
-      document.querySelectorAll("#videos video").forEach((v) => {
-        v.setSinkId(this.audioOutputId).catch(() => {});
-      });
-    },
-
-    setupAudioAnalysis(id, stream) {
-      if (!stream.getAudioTracks().length) return;
-      try {
-        if (!audioCtx) {
-          const Ctx = window.AudioContext || window.webkitAudioContext;
-          if (!Ctx) return;
-          audioCtx = new Ctx();
-        }
-        if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
-        const source = audioCtx.createMediaStreamSource(stream);
-        const analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 512;
-        source.connect(analyser);
-        analysers.set(id, {
-          analyser,
-          data: new Float32Array(analyser.fftSize),
-          level: 0,
-          speaking: false,
-          lastActive: 0,
-        });
-      } catch (err) {
-        console.warn("audio analysis setup failed", err);
-      }
-    },
-
-    stopAudioAnalysis(id) {
-      analysers.delete(id);
-      this.setSpeaking(id, false);
-      if (this.activeId === id) {
-        this.activeId = null;
-        this.spotManual = false;
-      }
-    },
-
-    startSpeakingLoop() {
-      if (speakTimer) return;
-      speakTimer = setInterval(() => this.detectSpeaking(), 250);
-    },
-
-    stopSpeakingLoop() {
-      clearInterval(speakTimer);
-      speakTimer = null;
-      for (const [id, entry] of analysers) {
-        entry.speaking = false;
-        this.setSpeaking(id, false);
-      }
-    },
-
-    detectSpeaking() {
-      const SPEAK_ON = 0.03;
-      const SPEAK_OFF = 0.015;
-      const HOLD_MS = 900;
-      const now = Date.now();
-      for (const [id, entry] of analysers) {
-        entry.analyser.getFloatTimeDomainData(entry.data);
-        let sum = 0;
-        for (let i = 0; i < entry.data.length; i++) sum += entry.data[i] * entry.data[i];
-        const rms = Math.sqrt(sum / entry.data.length);
-        entry.level = Math.max(rms, entry.level * 0.7);
-        if (entry.level >= SPEAK_ON) entry.lastActive = now;
-        const speaking = entry.speaking
-          ? entry.level >= SPEAK_OFF || now - entry.lastActive < HOLD_MS
-          : entry.level >= SPEAK_ON;
-        if (speaking !== entry.speaking) {
-          entry.speaking = speaking;
-          this.setSpeaking(id, speaking);
-        }
-      }
-    },
-
-    setSpeaking(id, speaking) {
-      if (id === "local") {
-        this.speaking = speaking;
-        return;
-      }
-      const p = this.peers.find((x) => x.id === id);
-      if (p) p.speaking = speaking;
-    },
-
-    startNetMonitor() {
-      if (netTimer) return;
-      netTimer = setInterval(() => this.collectStats(), 2000);
-    },
-
-    stopNetMonitor() {
-      clearInterval(netTimer);
-      netTimer = null;
-      this.statsPrev.clear();
-      for (const p of this.peers) {
-        p.rtt = null;
-        p.level = "";
-      }
-    },
-
-    levelFor(rttMs, lossPct) {
-      if ((rttMs == null || rttMs < 150) && (lossPct == null || lossPct < 2)) return "good";
-      if ((rttMs == null || rttMs < 400) && (lossPct == null || lossPct < 8)) return "fair";
-      return "poor";
-    },
-
-    async collectStats() {
-      for (const [peerId, pc] of this.pcs) {
-        try {
-          const report = await pc.getStats();
-          let bestPair = null;
-          const inboundByKind = {};
-          report.forEach((r) => {
-            if (r.type === "candidate-pair" && r.state === "succeeded" && r.currentRoundTripTime != null) {
-              if (
-                !bestPair ||
-                (r.selected === true && bestPair.selected !== true) ||
-                (r.selected === bestPair.selected &&
-                  (r.lastPacketReceivedTimestamp || 0) > (bestPair.lastPacketReceivedTimestamp || 0))
-              ) {
-                bestPair = r;
-              }
-            }
-            if (r.type === "inbound-rtp" && !r.isRemote) {
-              inboundByKind[r.kind] = r;
-            }
-          });
-
-          let rttMs = null;
-          if (bestPair) rttMs = bestPair.currentRoundTripTime * 1000;
-
-          let lossPct = null;
-          const inbound = inboundByKind.video || inboundByKind.audio;
-          if (inbound) {
-            const key = peerId + ":" + inbound.kind;
-            const prev = this.statsPrev.get(key);
-            const received = inbound.packetsReceived || 0;
-            const lost = Math.max(inbound.packetsLost || 0, 0);
-            if (prev) {
-              const dRecv = received - prev.received;
-              const dLost = Math.max(lost - prev.lost, 0);
-              const total = dRecv + dLost;
-              if (total > 0) lossPct = (dLost / total) * 100;
-            }
-            this.statsPrev.set(key, { received, lost });
-          }
-
-          this.updatePeer(peerId, { rtt: rttMs, level: this.levelFor(rttMs, lossPct) });
-        } catch (err) {
-          console.warn("stats collection failed", err);
-        }
-      }
-    },
-
-    async acquireTrack(kind) {
-      const devId = kind === "video" ? this.videoId : this.audioInputId;
-      const attempts = [];
-      if (devId) attempts.push({ [kind]: { deviceId: { exact: devId } } });
-      attempts.push({ [kind]: true });
-      for (const constraints of attempts) {
-        try {
-          const s = await navigator.mediaDevices.getUserMedia(constraints);
-          s.getTracks().forEach((t) => { if (t.kind !== kind) t.stop(); });
-          const track = s.getTracks().find((t) => t.kind === kind);
-          if (track) return track;
-        } catch (err) {
-          console.warn(kind + " недоступно", err);
-        }
-      }
-      throw new Error(kind + " недоступно");
-    },
-
-    async changeDevice(kind) {
-      if (kind === "audiooutput") {
-        this.applyAudioOutput();
-        return;
-      }
-
-      if (kind === "videoinput" && this.screenShare) {
-        this.notify("для смены камеры остановите демонстрацию экрана");
-        return;
-      }
-
-      if (!this.localStream) return;
-
-      const trackKind = kind === "videoinput" ? "video" : "audio";
-      let newTrack = null;
-      try {
-        newTrack = await this.acquireTrack(trackKind);
-      } catch (err) {
-        console.warn(trackKind + " недоступно", err);
-        if (trackKind === "video") { this.camOn = false; this.notify("камера недоступна"); }
-        if (trackKind === "audio") { this.micOn = false; this.notify("микрофон недоступен"); }
-        return;
-      }
-      if (!newTrack) return;
-
-      const old = this.localStream.getTracks().find((t) => t.kind === trackKind);
-      if (old) {
-        old.stop();
-        this.localStream.removeTrack(old);
-      }
-      newTrack.enabled = trackKind === "video" ? this.camOn : this.micOn;
-      this.localStream.addTrack(newTrack);
-
-      for (const pc of this.pcs.values()) {
-        try {
-          await this.replaceOrAddTrack(pc, trackKind, newTrack);
-        } catch (err) {
-          console.error("replaceTrack failed", err);
-        }
-      }
-
-      this.$nextTick(() => {
-        const v = document.getElementById("vid-local");
-        if (v) v.srcObject = this.localStream;
-        this.applyAudioOutput();
-      });
-    },
-
-    getRoomLink() {
-      return location.origin + location.pathname + "?room=" + encodeURIComponent(this.room);
-    },
-
-    share() {
-      const link = this.getRoomLink();
-      (async () => {
-        try {
-          if (navigator.clipboard?.writeText) {
-            await navigator.clipboard.writeText(link);
-          } else {
-            const input = document.createElement("textarea");
-            input.value = link;
-            input.setAttribute("readonly", "");
-            input.style.position = "fixed";
-            input.style.opacity = "0";
-            document.body.appendChild(input);
-            input.select();
-            const copied = document.execCommand("copy");
-            input.remove();
-            if (!copied) throw new Error("copy command failed");
-          }
-          this.notify("ссылка скопирована!", 2000);
-        } catch (err) {
-          console.warn("не удалось скопировать ссылку", err);
-          this.notify("не удалось скопировать ссылку");
-        }
-      })();
-    },
-
-    selectId(id) {
-      if (!SPOTLIGHT_ENABLED) return;
-      if (this.activeId === id) {
-        this.activeId = null;
-        this.spotManual = false;
-      } else {
-        this.activeId = id;
-        this.spotManual = true;
-      }
-    },
-
-    fullscreen(id) {
-      const tile = document.getElementById("tile-" + id);
-      if (!tile) return;
-      if (document.fullscreenElement) {
-        document.exitFullscreen().catch(() => {});
-      } else {
-        tile.requestFullscreen().catch(() => {});
-      }
-    },
-
-    send(obj) {
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify(obj));
-      }
-    },
-
-    notify(text, ms = 4000) {
-      clearTimeout(notifyTimer);
-      this.status = text;
-      notifyTimer = setTimeout(() => {
-        if (this.status === text) {
-          this.status = this.connected ? "в созвоне: " + this.room : "не подключено";
-        }
-      }, ms);
-    },
-
-    async join() {
-      if (this.connected || this.connecting) return;
-
-      const room = (this.room || "").trim();
-      if (!room) {
-        this.notify("введите ID комнаты");
-        return;
-      }
-
-      const url = new URL(location.href);
-      url.searchParams.set("room", room);
-      history.replaceState(null, "", url);
-      this.room = room;
-      this.connectionToken += 1;
-      const token = this.connectionToken;
-      this.connecting = true;
-
-      this.status = "запрос камеры/микрофона...";
-      this.updateColor();
-      this.initial = (this.name || "Я").slice(0, 1).toUpperCase();
-
-      try {
-        await this.startMedia();
-        this.startSpeakingLoop();
-        this.startNetMonitor();
-
-        this.reconnectAttempts = 0;
-        await this.connect(token);
-      } catch (err) {
-        console.error("join failed", err);
-        if (token === this.connectionToken) {
-          this.teardown();
-          this.status = "не удалось подключиться";
-        }
-      } finally {
-        if (token === this.connectionToken) this.connecting = false;
-      }
-    },
-
-    async connect(token = this.connectionToken) {
-      await this.loadIceServers();
-      if (token !== this.connectionToken || !this.room) {
-        throw new Error("connection cancelled");
-      }
-
+      await pc.setLocalDescription(await pc.createOffer());
+      await applyBitrate().catch((error) => console.warn("initial bitrate update failed", error));
+      if (token !== attempt) return;
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      return new Promise((resolve, reject) => {
-        let ws = null;
-        let settled = false;
-        let timeout = null;
-
-        const clearPending = () => {
-          if (this.pendingConnectReject === reject) this.pendingConnectReject = null;
-        };
-        const resolveOnce = () => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timeout);
-          clearPending();
-          resolve();
-        };
-        const rejectOnce = (err) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timeout);
-          clearPending();
-          reject(err);
-        };
-
-        try {
-          ws = new WebSocket(`${proto}://${location.host}/ws`);
-        } catch (err) {
-          rejectOnce(err);
-          return;
-        }
-
-        this.pendingConnectReject = reject;
-        this.ws = ws;
-        timeout = setTimeout(() => {
-          rejectOnce(new Error("WebSocket connection timeout"));
-          if (this.ws === ws) this.ws = null;
-          ws.onopen = null;
-          ws.onmessage = null;
-          ws.onerror = null;
-          ws.onclose = null;
-          try { ws.close(); } catch (_) {}
-        }, 10000);
-
-        ws.onopen = () => {
-          if (token !== this.connectionToken || this.ws !== ws) {
-            rejectOnce(new Error("stale WebSocket connection"));
-            ws.close();
-            return;
-          }
-          this.connected = true;
-          this.connecting = false;
-          this.status = "в созвоне: " + this.room;
-          this.send({
-            type: "join",
-            room: this.room,
-            data: { name: this.name, camOn: this.camOn, micOn: this.micOn, screenShare: this.screenShare, color: this.myColor },
-          });
-          resolveOnce();
-        };
-
-        ws.onerror = () => {
-          console.warn("WebSocket error");
-        };
-        ws.onclose = () => {
-          const isCurrent = this.ws === ws;
-          if (!settled) rejectOnce(new Error("WebSocket connection closed"));
-          if (!isCurrent) return;
-          this.ws = null;
-          this.handleClose();
-        };
-        ws.onmessage = (ev) => this.handleWsMessage(ev);
-      });
-    },
-
-    handleWsMessage(ev) {
-      let msg;
-      try {
-        msg = JSON.parse(ev.data);
-      } catch (err) {
-        console.warn("malformed signaling message", err);
-        return;
-      }
-      this.handleMessage(msg).catch((err) => console.error("message handling failed", err));
-    },
-
-    handleClose() {
-      this.connected = false;
-      if (!this.room || !this.myId) {
-        this.connecting = false;
-        this.status = "соединение закрыто";
-        return;
-      }
-      this.connecting = true;
-      this.scheduleReconnect();
-    },
-
-    scheduleReconnect() {
-      if (this.reconnectTimer) return;
-      const attempt = this.reconnectAttempts + 1;
-      if (attempt > MAX_RECONNECT_ATTEMPTS) {
-        this.teardown();
-        this.status = "не удалось восстановить соединение";
-        return;
-      }
-      this.reconnectAttempts = attempt;
-      this.connecting = true;
-      const delay = Math.min(RECONNECT_BASE_DELAY_MS * 2 ** (attempt - 1), RECONNECT_MAX_DELAY_MS);
-      this.status = `соединение потеряно, переподключение (${attempt}/${MAX_RECONNECT_ATTEMPTS})...`;
-      this.reconnectTimer = setTimeout(() => {
-        this.reconnectTimer = null;
-        if (!this.room || !this.myId) {
-          this.connecting = false;
-          return;
-        }
-        this.connect(this.connectionToken).catch((err) => {
-          console.warn("reconnect failed", err);
-          if (this.room && this.myId && !this.reconnectTimer) this.scheduleReconnect();
+      status("Подключение к комнате...");
+      const socket = await openWebSocket(`${proto}://${location.host}/ws`);
+      if (token !== attempt) { socket.close(); return; }
+      ws = socket;
+      ws.onmessage = (event) => {
+        messageQueue = messageQueue.then(() => handleMessage(JSON.parse(event.data), token)).catch((error) => {
+          if (token !== attempt) return;
+          console.error(error);
+          status("Ошибка согласования соединения");
         });
-      }, delay);
-    },
-
-    parseInfo(raw) {
-      if (!raw) return {};
-      if (typeof raw === "string") {
-        try {
-          return JSON.parse(raw);
-        } catch {
-          return {};
-        }
+      };
+      ws.onclose = () => { if (token === attempt) leave("Соединение закрыто"); };
+      ws.send(JSON.stringify({ type: "join", room, data: pc.localDescription, profile: profile() }));
+      joinSent = true;
+      for (const candidate of localCandidates.splice(0)) {
+        ws.send(JSON.stringify({ type: "candidate", data: candidate }));
       }
-      return raw;
-    },
+    } catch (error) {
+      console.error("Call join failed", error);
+      if (token === attempt) leave(`Не удалось подключиться: ${error.message}`);
+    }
+  }
 
-    async handleMessage(msg) {
-      switch (msg.type) {
-        case "joined": {
-          this.myId = msg.data.id;
-          this.reconnectAttempts = 0;
-          document.title = "Sozvon — " + this.room;
-          const peersList = msg.data.peers || [];
-          const alive = new Set(peersList.map((p) => p.id));
-          alive.add(this.myId);
-          for (const [id, pc] of this.pcs) {
-            if (!alive.has(id)) {
-              pc.close();
-              this.pcs.delete(id);
-              this.pendingIce.delete(id);
-              this.stopAudioAnalysis(id);
-            }
-          }
-          this.peers = this.peers.filter((p) => alive.has(p.id));
-          for (const p of peersList) {
-            const info = this.parseInfo(p);
-            if (p.id === this.myId) continue;
-            const old = this.pcs.get(p.id);
-            if (old) {
-              old.close();
-              this.pcs.delete(p.id);
-              this.pendingIce.delete(p.id);
-              this.stopAudioAnalysis(p.id);
-            }
-            this.addPeer(p.id, info);
-            this.createPeer(p.id, true);
-          }
-          break;
-        }
+  function leave(message = "Не подключено") {
+    attempt += 1;
+    joinSent = false;
+    localCandidates.length = 0;
+    remoteCandidates.length = 0;
+    busy = false;
+    joined = false;
+    localPeerID = "";
+    setChatUnread(false);
+    el["room-content"].classList.remove("chat-open");
+    el["chat-toggle"].setAttribute("aria-expanded", "false");
+    el["chat-toggle"].textContent = "💬 Чат";
+    clearTimeout(noticeTimer);
+    if (ws) { ws.onclose = null; ws.close(); ws = null; }
+    if (pc) { pc.close(); pc = null; }
+    localSenders.audio = null;
+    localSenders.video = null;
+    screenStream?.getTracks().forEach((track) => { track.onended = null; track.stop(); });
+    screenStream = null;
+    localStream?.getTracks().forEach((track) => track.stop());
+    localStream = null;
+    cameraTrack = null;
+    remoteStreams.clear();
+    profiles.clear();
+    mutedPeers.clear();
+    for (const id of analysers.keys()) stopAnalysis(id);
+    clearInterval(speakingTimer);
+    speakingTimer = null;
+    audioContext?.close().catch(() => {});
+    audioContext = null;
+    activeId = null;
+    el.videos.classList.remove("spotlight");
+    el.videos.replaceChildren();
+    el["chat-messages"].replaceChildren();
+    setRoomTab("video");
+    document.title = "Sozvon";
+    messageQueue = Promise.resolve();
+    updateControls();
+    status(message);
+  }
 
-        case "user_joined": {
-          const peerId = msg.from;
-          const info = this.parseInfo(msg.data);
-          this.addPeer(peerId, info);
-          this.createPeer(peerId, false);
-          break;
-        }
+  async function replaceLocalTrack(kind, track) {
+    const connection = pc;
+    const sender = localSenders[kind];
+    if (!sender) { track.stop(); throw new Error("Не найден медиаканал"); }
+    try { await sender.replaceTrack(track); }
+    catch (error) { track.stop(); throw error; }
+    if (pc !== connection || localSenders[kind] !== sender) {
+      track.stop();
+      throw new Error("Соединение закрыто");
+    }
+    const old = localStream?.getTracks().find((item) => item.kind === kind);
+    if (old) { localStream.removeTrack(old); old.stop(); }
+    localStream ||= new MediaStream();
+    localStream.addTrack(track);
+    if (kind === "video") cameraTrack = track;
+    stopAnalysis("local");
+    analyzeAudio("local", localStream);
+    renderTile("local");
+    await applyBitrate().catch((error) => console.warn("bitrate update failed after track replacement", error));
+    if (pc === connection && kind === "video") requestVideoRefresh();
+  }
 
-        case "user_left": {
-          this.removePeer(msg.from);
-          break;
-        }
+  function broadcastState() {
+    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "state", data: profile() }));
+  }
 
-        case "state": {
-          const peerId = msg.from;
-          const info = this.parseInfo(msg.data);
-          this.updatePeer(peerId, info);
-          break;
-        }
+  function requestVideoRefresh() {
+    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "refresh_video" }));
+  }
 
-        case "offer": {
-          const peerId = msg.from;
-          let pc = this.pcs.get(peerId);
-          if (!pc) {
-            this.addPeer(peerId, {});
-            pc = this.createPeer(peerId, false);
-          }
-          try {
-            const colliding = pc._makingOffer || pc.signalingState !== "stable";
-            pc._ignoreOffer = !pc._polite && colliding;
-            if (pc._ignoreOffer) break;
-            if (colliding) {
-              await pc.setLocalDescription({ type: "rollback" });
-            }
-            await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-            this.send({ type: "answer", to: peerId, data: answer });
-            await this.flushIceQueue(peerId);
-          } catch (err) {
-            console.error("answer failed", err);
-          }
-          break;
-        }
-
-        case "answer": {
-          const peerId = msg.from;
-          const pc = this.pcs.get(peerId);
-          if (pc) {
-            try {
-              await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
-            } catch (err) {
-              console.error("setRemoteDescription(answer) failed", err);
-            }
-            await this.flushIceQueue(peerId);
-          }
-          break;
-        }
-
-        case "candidate": {
-          const peerId = msg.from;
-          if (!msg.data) break;
-          const pc = this.pcs.get(peerId);
-          if (!pc || !pc.remoteDescription) {
-            this.queueIce(peerId, msg.data);
-            break;
-          }
-          try {
-            await pc.addIceCandidate(new RTCIceCandidate(msg.data));
-          } catch (err) {
-            console.error("addIceCandidate failed", err);
-          }
-          break;
-        }
-      }
-    },
-
-    teardown() {
-      this.connectionToken += 1;
-      this.connecting = false;
-      if (this.reconnectTimer) {
-        clearTimeout(this.reconnectTimer);
-        this.reconnectTimer = null;
-      }
-      if (this.pendingConnectReject) {
-        const reject = this.pendingConnectReject;
-        this.pendingConnectReject = null;
-        reject(new Error("connection cancelled"));
-      }
-      const screenStream = this.screenStream;
-      const savedMic = this._savedMicTrack;
-      const screenAudio = this._screenAudioTrack;
-      this.screenStream = null;
-      this.screenShare = false;
-      this._screenAudioTrack = null;
-      this._savedMicTrack = null;
-      this._camWasOn = false;
-      screenStream?.getTracks().forEach((t) => {
-        t.onended = null;
-        t.stop();
-      });
-      if (screenAudio && !screenStream?.getTracks().includes(screenAudio)) screenAudio.stop();
-      if (savedMic && !this.localStream?.getTracks().includes(savedMic)) savedMic.stop();
-      if (this.ws) {
-        const ws = this.ws;
-        this.ws = null;
-        ws.onclose = null;
-        ws.onmessage = null;
-        ws.close();
-      }
-      for (const pc of this.pcs.values()) pc.close();
-      this.pcs.clear();
-      this.pendingIce.clear();
-      if (this.localStream) {
-        this.localStream.getTracks().forEach((t) => t.stop());
-        this.localStream = null;
-      }
-      this.peers = [];
-      this.myId = null;
-      this.connected = false;
-      this.reconnectAttempts = 0;
-      this.stopSpeakingLoop();
-      this.stopNetMonitor();
-      analysers.clear();
-      if (audioCtx) {
-        audioCtx.close().catch(() => {});
-        audioCtx = null;
-      }
-      this.speaking = false;
-      this.spotManual = false;
-      this.activeId = null;
-      document.title = "Sozvon";
-    },
-
-    leave() {
-      this.teardown();
-      this.status = "не подключено";
-    },
-
-    broadcastState() {
-      this.send({
-        type: "state",
-        data: { name: this.name, camOn: this.camOn, micOn: this.micOn, screenShare: this.screenShare, color: this.myColor },
-      });
-    },
-
-    async toggleMic() {
-      const track = this.localStream?.getAudioTracks()[0];
-      if (!track) {
-        this.notify(this.connected ? "микрофон недоступен" : "сначала войдите в созвон");
-        return;
-      }
+  async function toggleMic() {
+    const token = attempt;
+    let track = localStream?.getAudioTracks()[0];
+    if (!track) {
+      try { track = await acquireTrack("audio"); await replaceLocalTrack("audio", track); }
+      catch { if (token === attempt) notify("Микрофон недоступен"); return; }
+      if (token !== attempt) return;
+      track.enabled = true;
+    } else {
       track.enabled = !track.enabled;
-      this.micOn = track.enabled;
-      this.broadcastState();
-    },
+    }
+    micOn = track.enabled;
+    renderTile("local");
+    updateControls();
+    broadcastState();
+  }
 
-    async toggleCam() {
-      if (this.screenShare) {
-        await this.toggleScreen();
-        return;
-      }
-      const track = this.localStream?.getVideoTracks()[0];
-      if (!track) {
-        this.notify(this.connected ? "камера недоступна" : "сначала войдите в созвон");
-        return;
-      }
+  async function toggleCam() {
+    const token = attempt;
+    if (screenStream) { await toggleScreen(); return; }
+    let track = cameraTrack;
+    if (!track) {
+      try { track = await acquireTrack("video"); await replaceLocalTrack("video", track); }
+      catch { if (token === attempt) notify("Камера недоступна"); return; }
+      if (token !== attempt) return;
+      track.enabled = true;
+    } else {
       track.enabled = !track.enabled;
-      this.camOn = track.enabled;
-      if (!this.camOn) this.updateColor();
-      this.broadcastState();
-    },
+    }
+    camOn = track.enabled;
+    renderTile("local");
+    updateControls();
+    broadcastState();
+  }
 
-    async toggleScreen() {
-      if (this.screenShare) {
-        await this.stopScreenShare();
-        return;
-      }
-
-      if (!navigator.mediaDevices?.getDisplayMedia) {
-        this.notify("демонстрация экрана не поддерживается в этом браузере");
-        return;
-      }
-      if (!this.localStream) {
-        this.notify("сначала войдите в созвон");
-        return;
-      }
-      let ss = null;
+  async function toggleScreen() {
+    const token = attempt;
+    const sender = videoSender();
+    if (!sender) return;
+    if (screenStream) {
+      const previousScreen = screenStream;
+      await sender.replaceTrack(cameraTrack);
+      if (token !== attempt) return;
+      previousScreen.getTracks().forEach((track) => { track.onended = null; track.stop(); });
+      screenStream = null;
+    } else {
+      if (!navigator.mediaDevices?.getDisplayMedia) { notify("Демонстрация экрана недоступна"); return; }
+      let stream;
       try {
-        ss = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
-        const screenTrack = ss.getVideoTracks()[0];
-        if (!screenTrack) throw new Error("screen video track is unavailable");
-
-        const oldVideo = this.localStream.getVideoTracks()[0] ?? null;
-        const screenAudio = ss.getAudioTracks()[0] ?? null;
-        const oldAudio = screenAudio ? (this.localStream.getAudioTracks()[0] ?? null) : null;
-
-        this.screenStream = ss;
-        this.screenShare = true;
-        this._camWasOn = this.camOn;
-        this.camOn = true;
-        this._screenAudioTrack = screenAudio;
-        this._savedMicTrack = oldAudio;
-        screenTrack.onended = () => this.stopScreenShare();
-
-        if (oldVideo) {
-          this.localStream.removeTrack(oldVideo);
-          oldVideo.stop();
-        }
-        this.localStream.addTrack(screenTrack);
-        screenTrack.contentHint = "detail";
-        this.applyVideoBitrate();
-
-        if (screenAudio) {
-          if (oldAudio) this.localStream.removeTrack(oldAudio);
-          screenAudio.enabled = this.micOn;
-          this.localStream.addTrack(screenAudio);
-        }
-
-        for (const pc of this.pcs.values()) {
-          try {
-            await this.replaceOrAddTrack(pc, "video", screenTrack);
-          } catch (err) {
-            console.error("screen replaceTrack(video) failed", err);
-          }
-
-          if (screenAudio) {
-            try {
-              await this.replaceOrAddTrack(pc, "audio", screenAudio);
-            } catch (err) {
-              console.error("screen replaceTrack(audio) failed", err);
-            }
-          }
-        }
-
-        this.$nextTick(() => {
-          const v = document.getElementById("vid-local");
-          if (v) v.srcObject = this.localStream;
-        });
-
-        this.broadcastState();
-      } catch (err) {
-        console.warn("screen share failed", err);
-        if (this.screenShare) {
-          await this.stopScreenShare();
-        } else {
-          ss?.getTracks().forEach((t) => {
-            t.onended = null;
-            t.stop();
-          });
-        }
-        this.notify("не удалось начать демонстрацию экрана");
+        stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        if (token !== attempt) { stream.getTracks().forEach((track) => track.stop()); return; }
+        await sender.replaceTrack(stream.getVideoTracks()[0]);
+        if (token !== attempt) { stream.getTracks().forEach((track) => track.stop()); return; }
+        screenStream = stream;
+        stream.getVideoTracks()[0].onended = () => { if (token === attempt) toggleScreen().catch(console.error); };
+      } catch (error) {
+        stream?.getTracks().forEach((track) => track.stop());
+        if (token === attempt) console.warn("screen share failed", error);
+        return;
       }
-    },
+    }
+    renderTile("local");
+    updateControls();
+    await applyBitrate().catch((error) => console.warn("bitrate update failed after screen share change", error));
+    if (token !== attempt) return;
+    broadcastState();
+    requestVideoRefresh();
+  }
 
-    async stopScreenShare() {
-      if (!this.screenShare) return;
-      this.screenShare = false;
-      const ss = this.screenStream;
-      this.screenStream = null;
-      this.camOn = this._camWasOn ?? false;
-      this._camWasOn = false;
-      if (!this.camOn) this.updateColor();
-      ss?.getTracks().forEach((t) => {
-        t.onended = null;
-        t.stop();
+  async function changeDevice(kind) {
+    const token = attempt;
+    savePrefs();
+    if (kind === "audiooutput") { applyAudioOutput(); return; }
+    if (!joined) return;
+    if (kind === "video" && screenStream) { notify("Остановите демонстрацию экрана"); return; }
+    if (kind === "video") {
+      const deviceId = el["video-input"].value;
+      videoDeviceUpdate = videoDeviceUpdate.catch(() => {}).then(() => changeVideoDevice(deviceId, token)).catch((error) => {
+        if (token !== attempt) return;
+        console.warn("camera switch failed", error);
+        notify("Не удалось переключить камеру");
       });
-      this.applyVideoBitrate();
-      await this.replaceVideoTrack();
-      await this.replaceAudioTrack();
-      this.broadcastState();
-    },
+      return videoDeviceUpdate;
+    }
+    try {
+      const track = await acquireTrack(kind);
+      track.enabled = kind === "audio" ? micOn : camOn;
+      await replaceLocalTrack(kind, track);
+      if (token === attempt) broadcastState();
+    } catch (error) {
+      if (token !== attempt) return;
+      console.warn("device change failed", error);
+      notify("Устройство недоступно");
+    }
+  }
 
-    async replaceVideoTrack() {
-      if (!this.localStream) return;
-      const oldVideo = this.localStream.getVideoTracks()[0] ?? null;
-      if (oldVideo) {
-        this.localStream.removeTrack(oldVideo);
-        oldVideo.stop();
+  async function changeVideoDevice(deviceId, token) {
+    if (token !== attempt || !joined || !pc || screenStream) return;
+    const sender = videoSender();
+    const previousTrack = cameraTrack;
+    const previousDeviceId = previousTrack?.getSettings().deviceId || "";
+    const previousEnabled = previousTrack?.enabled ?? camOn;
+    const isMobile = navigator.userAgentData?.mobile || /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    const acquireVideo = async (id) => {
+      if (token !== attempt) throw new Error("Соединение закрыто");
+      const constraints = id ? { deviceId: { exact: id } } : true;
+      const stream = await navigator.mediaDevices.getUserMedia({ video: constraints });
+      if (token !== attempt) {
+        stream.getTracks().forEach((item) => item.stop());
+        throw new Error("Соединение закрыто");
       }
+      const track = stream.getVideoTracks()[0];
+      if (!track) {
+        stream.getTracks().forEach((item) => item.stop());
+        throw new Error("Камера не вернула видеотрек");
+      }
+      return track;
+    };
+    const releasePrevious = async () => {
+      await sender.replaceTrack(null);
+      if (token !== attempt) throw new Error("Соединение закрыто");
+      localStream?.removeTrack(previousTrack);
+      previousTrack.stop();
+      cameraTrack = null;
+    };
+    const restorePrevious = async () => {
+      const restored = await acquireVideo(previousDeviceId);
+      restored.enabled = previousEnabled;
+      await sender.replaceTrack(restored);
+      if (token !== attempt) { restored.stop(); return; }
+      localStream ||= new MediaStream();
+      localStream.addTrack(restored);
+      cameraTrack = restored;
+      renderTile("local");
+      await applyBitrate().catch((error) => console.warn("bitrate update failed after camera restore", error));
+      if (token === attempt) requestVideoRefresh();
+    };
 
-      try {
-        const vc = this.videoId ? { deviceId: { exact: this.videoId } } : true;
-        const cs = await navigator.mediaDevices.getUserMedia({ video: vc });
-        const newTrack = cs.getVideoTracks()[0];
-        if (!newTrack) throw new Error("camera track is unavailable");
-        newTrack.enabled = this.camOn;
-        newTrack.contentHint = "motion";
-        this.localStream.addTrack(newTrack);
-
-        for (const pc of this.pcs.values()) {
-          await this.replaceOrAddTrack(pc, "video", newTrack);
-        }
-
-        this.$nextTick(() => {
-          const v = document.getElementById("vid-local");
-          if (v) v.srcObject = this.localStream;
-        });
-      } catch (err) {
-        console.warn("replace video track failed", err);
-        this.camOn = false;
-        for (const pc of this.pcs.values()) {
-          try { await this.replaceOrAddTrack(pc, "video", null); } catch (_) {}
+    let track;
+    let releasedPrevious = false;
+    try {
+      if (isMobile && previousTrack && sender) {
+        await releasePrevious();
+        releasedPrevious = true;
+      }
+      track = await acquireVideo(deviceId);
+    } catch (firstError) {
+      if (token !== attempt) return;
+      if (!previousTrack || !sender) throw firstError;
+      if (!releasedPrevious) {
+        await releasePrevious();
+        releasedPrevious = true;
+        try {
+          track = await acquireVideo(deviceId);
+        } catch (switchError) {
+          firstError = switchError;
         }
       }
-    },
-
-    async replaceAudioTrack() {
-      const screenAudio = this._screenAudioTrack;
-      if (!screenAudio || !this.localStream) return;
-
-      try {
-        if (this.localStream.getAudioTracks().includes(screenAudio)) {
-          this.localStream.removeTrack(screenAudio);
+      if (!track && releasedPrevious) {
+        try { await restorePrevious(); }
+        catch (restoreError) { console.warn("camera restore failed", restoreError); }
+        if ([...el["video-input"].options].some((option) => option.value === previousDeviceId)) {
+          el["video-input"].value = previousDeviceId;
+          savePrefs();
         }
-
-        const savedMic = this._savedMicTrack;
-        const restoredMic = savedMic && savedMic.readyState !== "ended" ? savedMic : null;
-        if (restoredMic) {
-          restoredMic.enabled = this.micOn;
-          this.localStream.addTrack(restoredMic);
-        } else {
-          this.micOn = false;
-        }
-
-        for (const pc of this.pcs.values()) {
-          await this.replaceOrAddTrack(pc, "audio", restoredMic);
-        }
-      } catch (err) {
-        console.warn("replace audio track failed", err);
-      } finally {
-        this._screenAudioTrack = null;
-        this._savedMicTrack = null;
+        throw firstError;
       }
-    },
+    }
+
+    track.enabled = camOn;
+    await replaceLocalTrack("video", track);
+    if (token !== attempt) return;
+    savePrefs();
+    broadcastState();
+  }
+
+  async function share() {
+    const link = `${location.origin}/?room=${encodeURIComponent(el.room.value)}`;
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(link);
+      else {
+        const input = document.createElement("textarea");
+        input.value = link;
+        input.style.position = "fixed";
+        input.style.opacity = "0";
+        document.body.append(input);
+        input.select();
+        if (!document.execCommand("copy")) throw new Error("copy failed");
+        input.remove();
+      }
+      notify("Ссылка скопирована", 2000);
+    } catch { notify("Не удалось скопировать ссылку"); }
+  }
+
+  const prefs = loadPrefs();
+  loadPeerVolumes();
+  el.name.value = prefs.name || "";
+  el.room.value = new URLSearchParams(location.search).get("room") || new URLSearchParams(location.search).get("id") || prefs.room || "";
+  el.color.value = COLORS.includes(prefs.prefColor) ? prefs.prefColor : "";
+  el.bitrate.value = BITRATES[prefs.bitratePref] ? prefs.bitratePref : "medium";
+  el["audio-input"].dataset.preferred = prefs.audioInputId || "";
+  el["audio-output"].dataset.preferred = prefs.audioOutputId || "";
+  el["video-input"].dataset.preferred = prefs.videoId || "";
+  el.join.onclick = join;
+  el.leave.onclick = () => leave();
+  el["chat-toggle"].onclick = toggleChat;
+  el["chat-form"].addEventListener("submit", sendChatMessage);
+  el["video-tab"].onclick = () => setRoomTab("video");
+  el["chat-tab"].onclick = () => setRoomTab("chat");
+  el.mic.onclick = toggleMic;
+  el.cam.onclick = toggleCam;
+  el.screen.onclick = () => toggleScreen().catch(console.error);
+  el.share.onclick = share;
+  el.settings.onclick = () => {
+    el["device-bar"].hidden = !el["device-bar"].hidden;
+    el.settings.setAttribute("aria-pressed", String(!el["device-bar"].hidden));
   };
-}
+  el.name.addEventListener("input", () => { savePrefs(); if (document.getElementById("tile-local")) renderTile("local"); });
+  el.room.addEventListener("input", savePrefs);
+  el.color.onchange = () => { savePrefs(); if (joined) { renderTile("local"); broadcastState(); } };
+  el.bitrate.onchange = () => {
+    savePrefs();
+    if (!joined) return;
+    applyBitrate().then(() => notify("Качество видео обновлено", 1800)).catch((error) => {
+      console.warn("bitrate update failed", error);
+      notify("Не удалось применить качество видео");
+    });
+  };
+  el["audio-input"].onchange = () => changeDevice("audio");
+  el["audio-output"].onchange = () => changeDevice("audiooutput");
+  el["video-input"].onchange = () => changeDevice("video");
+  navigator.mediaDevices?.addEventListener("devicechange", enumerateDevices);
+  document.addEventListener("pointerdown", () => {
+    audioContext?.resume().catch(() => {});
+    for (const audio of el.videos.querySelectorAll("audio")) {
+      if (audio.srcObject) audio.play().catch(() => {});
+    }
+  });
+  window.addEventListener("beforeunload", () => leave());
+  updateControls();
+  enumerateDevices().then(() => {
+    for (const id of ["audio-input", "audio-output", "video-input"]) {
+      const select = el[id];
+      if ([...select.options].some((option) => option.value === select.dataset.preferred)) select.value = select.dataset.preferred;
+    }
+  });
+})();

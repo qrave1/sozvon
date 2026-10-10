@@ -13,7 +13,6 @@ import (
 
 	"github.com/qrave1/sozvon/internal/config"
 	"github.com/qrave1/sozvon/internal/sfu"
-	"github.com/qrave1/sozvon/internal/signaling"
 	"github.com/qrave1/sozvon/internal/turnserver"
 )
 
@@ -68,18 +67,22 @@ func runServer(cfg *config.Config) error {
 	defer sfuServer.Close()
 	slog.Info("SFU UDP listener started", "port", cfg.SFUUDPPort, "public_ip", publicIP)
 	slog.Info("server started", "port", cfg.HTTP.Port)
-	return http.ListenAndServe(cfg.HTTP.Port, newHandler(cfg, signaling.NewServer(), sfuServer))
+	return http.ListenAndServe(cfg.HTTP.Port, newHandler(cfg, sfuServer))
 }
 
-func newHandler(cfg *config.Config, meshServer *signaling.Server, sfuServer *sfu.Server) http.Handler {
+func newHandler(cfg *config.Config, callServer *sfu.Server) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/", noCache(http.FileServer(http.Dir("./web"))))
-	mux.HandleFunc("/ws", meshServer.HandleWS)
-	mux.HandleFunc("/sfu.html", http.NotFound)
-	mux.Handle("/sfu", noCache(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "./web/sfu.html")
-	})))
-	mux.HandleFunc("/sfu/ws", sfuServer.HandleWS)
+	mux.HandleFunc("/ws", callServer.HandleWS)
+	for _, path := range []string{"/sfu", "/sfu.html"} {
+		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+			target := "/"
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+		})
+	}
 
 	if cfg.TURN.RelayIP != "" {
 		mux.HandleFunc("/turn-config", func(w http.ResponseWriter, r *http.Request) {

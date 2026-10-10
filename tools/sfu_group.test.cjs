@@ -7,7 +7,7 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE_PATH || "playwright")
 
 const root = path.resolve(__dirname, "..");
 const port = Number(process.env.SFU_TEST_HTTP_PORT || 18003);
-const url = `http://127.0.0.1:${port}/sfu?room=browser-group`;
+const url = `http://127.0.0.1:${port}/?room=browser-group`;
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function stats(page) {
@@ -53,10 +53,10 @@ async function expectGroupMedia(pages, remoteCount = 3) {
   }
 }
 
-test("SFU group: late join, camera replacement, bitrate, screen, mute, leave and rejoin", { timeout: 120000 }, async () => {
+test("Group call: late join, camera replacement, bitrate, screen, mute, leave and rejoin", { timeout: 120000 }, async () => {
   const server = spawn(process.env.SFU_TEST_BINARY || path.join(root, ".sfu-check.exe"), [], {
     cwd: root, windowsHide: true,
-    env: { ...process.env, PORT: `:${port}`, HTTP_PORT: `:${port}`, SFU_UDP_PORT: "40003", SFU_PUBLIC_IP: "", TURN_RELAY_IP: "", TURN_ENABLED: "false" },
+    env: { ...process.env, PORT: `:${port}`, SFU_UDP_PORT: "40003", SFU_PUBLIC_IP: "", TURN_RELAY_IP: "", TURN_ENABLED: "false" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let serverLogs = "";
@@ -82,6 +82,8 @@ test("SFU group: late join, camera replacement, bitrate, screen, mute, leave and
         ...(i === 3 ? { viewport: { width: 390, height: 844 }, isMobile: true, userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile" } : {}),
       });
       const page = await context.newPage();
+      const websocketURLs = [];
+      page.on("websocket", (socket) => websocketURLs.push(socket.url()));
       await page.route("**/turn-config", (route) => route.fulfill({ json: {} }));
       await page.route("**/favicon.ico", (route) => route.fulfill({ status: 204 }));
       page.on("pageerror", (error) => errors.push(error.message));
@@ -114,14 +116,24 @@ test("SFU group: late join, camera replacement, bitrate, screen, mute, leave and
         };
       }, i === 3);
       await page.goto(url);
+      assert.equal(await page.title(), "Sozvon");
+      assert.equal(await page.locator("#room").inputValue(), "browser-group");
       await page.locator("#name").fill(`Participant ${i + 1}`);
       await page.locator("#join").click();
       await page.waitForFunction(() => window.testConnections.at(-1)?.connectionState === "connected", null, { timeout: 15000 });
+      assert.equal(await page.title(), "Sozvon - browser-group");
+      assert.deepEqual(websocketURLs, [`ws://127.0.0.1:${port}/ws`]);
       await page.evaluate(() => { window.testBlockVideo = false; });
       await page.locator("#cam").click();
       pages.push(page);
     }
     await expectGroupMedia(pages);
+
+    await pages[0].evaluate(() => {
+      Object.defineProperty(navigator.clipboard, "writeText", { configurable: true, value: async (text) => { window.testSharedLink = text; } });
+    });
+    await pages[0].locator("#share").click();
+    assert.equal(await pages[0].evaluate(() => window.testSharedLink), url);
 
     const mobile = pages[3];
     await pages[0].locator("#chat-toggle").click();
@@ -182,6 +194,7 @@ test("SFU group: late join, camera replacement, bitrate, screen, mute, leave and
     await expectGroupMedia(pages);
 
     await pages[1].locator("#leave").click();
+    assert.equal(await pages[1].title(), "Sozvon");
     await expectChatUnread(pages[1], false);
     await expectGroupMedia([pages[0], pages[2], pages[3]], 2);
     await pages[1].locator("#join").click();

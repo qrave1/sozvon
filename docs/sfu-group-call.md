@@ -1,5 +1,11 @@
 # SFU group-call behavior
 
+Group calls are the only call mode. The browser page is `/?room=<id>`,
+signaling uses `/ws`, and the client is served as `/client.js`. Old `/sfu`
+and `/sfu.html` links redirect to `/` while preserving the query string.
+The former mesh server and client have been removed. `SFU_UDP_PORT` and
+`SFU_PUBLIC_IP` remain the deployment settings for the media server.
+
 Each client keeps dedicated outbound audio and video senders, even when a device
 is initially unavailable. Incoming participant tracks use separate receive-only
 transceivers in the browser. With N participants publishing audio and video, each
