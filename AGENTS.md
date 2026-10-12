@@ -7,6 +7,8 @@
 - `internal/sfu/`: SFU, сигналинг, комнаты, публикации, подписки, RTP/RTCP и интеграционные тесты.
 - Сигналинг групповых звонков использует `coder/websocket`; старый mesh удалён.
 - `internal/config/`: конфигурация из окружения. `internal/turn/`: TURN-сервер.
+- `internal/database/`: подключение SQLite через GORM; `internal/database/repository/`: GORM Generics репозитории пользователей и refresh-сессий. AutoMigrate запускается при старте HTTP.
+- `internal/domain/`: модели пользователя, сессии и устройства без тегов хранения.
 - `web/`: обычные HTML/CSS/JavaScript без сборки; единственный клиент в `client.js` и `index.html`.
 - Звонки: `/?room=<id>` и `/ws`. Старые `/sfu` и `/sfu.html` перенаправляют на `/` с сохранением query; `/sfu/ws` и `/sfu.js` возвращают 404.
 - Единственная архитектура — SFU; выбора media mode и отдельных вариантов интерфейса нет. На фронте и в новых ссылках название архитектуры не отображается.

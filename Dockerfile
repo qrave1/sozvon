@@ -8,7 +8,7 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 go build -o build ./main.go
+RUN CGO_ENABLED=0 go build -o build .
 
 # финальный образ
 FROM alpine:3.24

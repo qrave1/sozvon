@@ -7,9 +7,14 @@ import (
 )
 
 type Config struct {
-	HTTP  http
-	Media media
-	TURN  turn
+	HTTP     http
+	Media    media
+	TURN     turn
+	Database database
+}
+
+type database struct {
+	Path string `env:"DATABASE_PATH" envDefault:"./data/sozvon.sqlite"`
 }
 
 type http struct {

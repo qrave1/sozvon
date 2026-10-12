@@ -5,6 +5,7 @@ go 1.27
 require (
 	github.com/caarlos0/env/v11 v11.4.1
 	github.com/coder/websocket v1.8.15
+	github.com/glebarez/sqlite v1.11.0
 	github.com/google/uuid v1.6.0
 	github.com/pion/logging v0.2.4
 	github.com/pion/rtcp v1.2.19
@@ -12,9 +13,16 @@ require (
 	github.com/pion/turn/v5 v5.1.2
 	github.com/pion/webrtc/v4 v4.2.23
 	github.com/urfave/cli/v3 v3.10.1
+	gorm.io/gorm v1.31.2
 )
 
 require (
+	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/glebarez/go-sqlite v1.21.2 // indirect
+	github.com/jinzhu/inflection v1.0.0 // indirect
+	github.com/jinzhu/now v1.1.5 // indirect
+	github.com/mattn/go-isatty v0.0.24 // indirect
+	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pion/datachannel v1.6.3 // indirect
 	github.com/pion/dtls/v3 v3.1.10 // indirect
 	github.com/pion/ice/v4 v4.4.7 // indirect
@@ -26,9 +34,15 @@ require (
 	github.com/pion/srtp/v3 v3.1.3 // indirect
 	github.com/pion/stun/v4 v4.0.1 // indirect
 	github.com/pion/transport/v5 v5.1.1 // indirect
+	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
+	modernc.org/libc v1.77.1 // indirect
+	modernc.org/mathutil v1.7.1 // indirect
+	modernc.org/memory v1.12.1 // indirect
+	modernc.org/sqlite v1.60.1 // indirect
 )

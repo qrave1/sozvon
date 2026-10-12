@@ -5,6 +5,10 @@ services:
         restart: always
         env_file:
             - .env
+        environment:
+            DATABASE_PATH: /app/data/sozvon.sqlite
+        volumes:
+            - sozvon-data:/app/data
         ports:
             - "${MEDIA_UDP_PORT:-40000}:${MEDIA_UDP_PORT:-40000}/udp"
         networks:
@@ -41,3 +45,6 @@ services:
 networks:
     traefik:
         external: true
+
+volumes:
+    sozvon-data:

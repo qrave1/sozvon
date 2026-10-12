@@ -12,6 +12,8 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/qrave1/sozvon/internal/config"
+	"github.com/qrave1/sozvon/internal/database"
+	"github.com/qrave1/sozvon/internal/database/repository"
 	"github.com/qrave1/sozvon/internal/sfu"
 	"github.com/qrave1/sozvon/internal/turn"
 )
@@ -56,6 +58,14 @@ func noCache(next http.Handler) http.Handler {
 }
 
 func runServer(cfg *config.Config) error {
+	db, err := database.Open(context.Background(), cfg.Database.Path)
+	if err != nil {
+		return err
+	}
+	defer database.Close(db)
+	if err := repository.AutoMigrate(db); err != nil {
+		return err
+	}
 	publicIP := cfg.Media.PublicIP
 	if publicIP == "" {
 		publicIP = cfg.TURN.RelayIP
