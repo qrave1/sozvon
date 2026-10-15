@@ -170,6 +170,29 @@ test("Group call: late join, camera replacement, bitrate, screen, mute, leave an
     await pages[0].locator("#chat-toggle").click();
 
     await mobile.locator("#settings").click();
+    for (const [id, key] of [["noise-suppression", "noiseSuppression"], ["echo-cancellation", "echoCancellation"]]) {
+      assert.equal(await mobile.locator(`#${id}`).isChecked(), true);
+      await mobile.locator(`#${id}`).click();
+      await mobile.waitForFunction(({ id, key }) => {
+        const actual = window.testConnections.at(-1).getSenders().find((sender) => sender.track?.kind === "audio").track.getSettings()[key];
+        return document.getElementById(id).checked === actual &&
+          (actual === false || document.getElementById("toast").textContent.includes("не смог применить"));
+      }, { id, key });
+      assert.equal(await mobile.evaluate(({ id, key }) => JSON.parse(localStorage.getItem("sozvon.prefs"))[key] === document.getElementById(id).checked, { id, key }), true);
+    }
+    const microphoneId = await mobile.evaluate(() => window.testConnections.at(-1).getSenders().find((sender) => sender.track?.kind === "audio").track.id);
+    await mobile.locator("#audio-input").selectOption(await mobile.locator("#audio-input").inputValue());
+    await mobile.waitForFunction((previous) => {
+      const track = window.testConnections.at(-1).getSenders().find((sender) => sender.track?.kind === "audio").track;
+      return track.id !== previous && track.getSettings().noiseSuppression === document.getElementById("noise-suppression").checked &&
+        track.getSettings().echoCancellation === document.getElementById("echo-cancellation").checked;
+    }, microphoneId);
+    await expectGroupMedia(pages);
+    for (const id of ["noise-suppression", "echo-cancellation"]) await mobile.locator(`#${id}`).check();
+    await mobile.waitForFunction(() => {
+      const settings = window.testConnections.at(-1).getSenders().find((sender) => sender.track?.kind === "audio").track.getSettings();
+      return settings.noiseSuppression === true && settings.echoCancellation === true;
+    });
     const cameraId = await mobile.evaluate(() => window.testConnections.at(-1).getSenders().find((sender) => sender.track?.kind === "video").track.id);
     const deviceId = await mobile.locator("#video-input").inputValue();
     await mobile.locator("#video-input").selectOption(deviceId);

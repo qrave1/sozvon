@@ -11,6 +11,7 @@
   const el = Object.fromEntries([
     "name", "room", "join", "leave", "welcome", "mic", "cam", "screen", "share", "chat-toggle", "settings", "status",
     "device-bar", "audio-input", "audio-output", "video-input", "color", "bitrate", "videos", "toast",
+    "noise-suppression", "echo-cancellation",
     "room-content", "room-tabs", "video-tab", "chat-tab", "chat-panel", "chat-messages", "chat-form", "chat-input",
   ].map((id) => [id, document.getElementById(id)]));
 
@@ -36,6 +37,9 @@
   let noticeTimer = null;
   let bitrateUpdate = Promise.resolve();
   let videoDeviceUpdate = Promise.resolve();
+  let audioProcessingUpdate = Promise.resolve();
+  let audioProcessingRevision = 0;
+  const audioOptions = { "noise-suppression": "noiseSuppression", "echo-cancellation": "echoCancellation" };
   const localSenders = { audio: null, video: null };
   const remoteStreams = new Map();
   const profiles = new Map();
@@ -68,6 +72,8 @@
         audioInputId: el["audio-input"].value, audioOutputId: el["audio-output"].value,
         videoId: el["video-input"].value, prefColor: el.color.value,
         bitratePref: el.bitrate.value,
+        noiseSuppression: el["noise-suppression"].checked,
+        echoCancellation: el["echo-cancellation"].checked,
       }));
     } catch { /* Storage can be unavailable in private mode. */ }
   }
@@ -337,14 +343,50 @@
     return servers;
   }
 
+  function audioConstraints(deviceId = "") {
+    const constraints = deviceId ? { deviceId: { exact: deviceId } } : {};
+    for (const [id, key] of Object.entries(audioOptions)) {
+      if (!el[id].disabled) constraints[key] = el[id].checked;
+    }
+    return constraints;
+  }
+
+  function applyAudioProcessing() {
+    const token = attempt;
+    const revision = ++audioProcessingRevision;
+    audioProcessingUpdate = audioProcessingUpdate.catch(() => {}).then(async () => {
+      const track = localStream?.getAudioTracks()[0];
+      if (token !== attempt || !track || track.readyState !== "live") return;
+      let failed = false;
+      const constraints = audioConstraints();
+      for (const key of Object.values(audioOptions)) {
+        if (typeof constraints[key] === "boolean") constraints[key] = { exact: constraints[key] };
+      }
+      try { await track.applyConstraints(constraints); }
+      catch { failed = true; }
+      if (token !== attempt || revision !== audioProcessingRevision || localStream?.getAudioTracks()[0] !== track) return;
+      const settings = track.getSettings();
+      for (const [id, key] of Object.entries(audioOptions)) {
+        if (el[id].disabled) continue;
+        if (typeof settings[key] === "boolean") {
+          if (settings[key] !== el[id].checked) failed = true;
+          el[id].checked = settings[key];
+        }
+      }
+      savePrefs();
+      if (failed) notify("Браузер не смог применить выбранные настройки звука");
+    });
+    return audioProcessingUpdate;
+  }
+
   async function acquireTrack(kind) {
     if (!navigator.mediaDevices?.getUserMedia) throw new Error("Камера и микрофон доступны только через HTTPS");
     const select = kind === "audio" ? el["audio-input"] : el["video-input"];
-    const constraints = { [kind]: select.value ? { deviceId: { exact: select.value } } : true };
+    const constraints = { [kind]: kind === "audio" ? audioConstraints(select.value) : select.value ? { deviceId: { exact: select.value } } : true };
     const token = attempt;
     let stream;
     try { stream = await navigator.mediaDevices.getUserMedia(constraints); }
-    catch { stream = await navigator.mediaDevices.getUserMedia({ [kind]: true }); }
+    catch { stream = await navigator.mediaDevices.getUserMedia({ [kind]: kind === "audio" ? audioConstraints() : true }); }
     if (token !== attempt) {
       stream.getTracks().forEach((track) => track.stop());
       throw new Error("Соединение закрыто");
@@ -357,7 +399,7 @@
       notify("Камера и микрофон доступны только через HTTPS", 6000);
       return new MediaStream();
     }
-    const audio = el["audio-input"].value ? { deviceId: { exact: el["audio-input"].value } } : true;
+    const audio = audioConstraints(el["audio-input"].value);
     const video = el["video-input"].value ? { deviceId: { exact: el["video-input"].value } } : true;
     let media;
     try { media = await navigator.mediaDevices.getUserMedia({ audio, video }); }
@@ -532,6 +574,8 @@
       const media = await startMedia();
       if (token !== attempt) { media.getTracks().forEach((track) => track.stop()); return; }
       localStream = media;
+      await applyAudioProcessing();
+      if (token !== attempt) return;
       cameraTrack = media.getVideoTracks()[0] || null;
       for (const track of media.getAudioTracks()) track.enabled = micOn;
       if (cameraTrack) cameraTrack.enabled = camOn;
@@ -646,6 +690,8 @@
     if (old) { localStream.removeTrack(old); old.stop(); }
     localStream ||= new MediaStream();
     localStream.addTrack(track);
+    if (kind === "audio") await applyAudioProcessing();
+    if (pc !== connection) return;
     if (kind === "video") cameraTrack = track;
     stopAnalysis("local");
     analyzeAudio("local", localStream);
@@ -857,6 +903,16 @@
   }
 
   const prefs = loadPrefs();
+  const supportedAudio = navigator.mediaDevices?.getSupportedConstraints?.() || {};
+  for (const [id, key] of Object.entries(audioOptions)) {
+    el[id].checked = prefs[key] !== false;
+    el[id].disabled = !supportedAudio[key];
+    if (el[id].disabled) {
+      el[id].checked = false;
+      el[id].parentElement.title = "Не поддерживается этим браузером";
+    }
+    el[id].onchange = () => { savePrefs(); applyAudioProcessing(); };
+  }
   loadPeerVolumes();
   el.name.value = prefs.name || "";
   el.room.value = new URLSearchParams(location.search).get("room") || new URLSearchParams(location.search).get("id") || prefs.room || "";
