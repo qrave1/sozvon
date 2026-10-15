@@ -351,6 +351,34 @@
     return constraints;
   }
 
+  async function recaptureMicrophone(track, constraints, token) {
+    const settings = track.getSettings();
+    const deviceId = track.getSettings().deviceId;
+    const device = deviceId ? { deviceId: { exact: deviceId } } : {};
+    // The same Chrome capture source cannot use two processing configurations.
+    track.stop();
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { ...constraints, ...device } });
+    } catch (error) {
+      // Restore audio if the requested processor configuration is unavailable.
+      if (token !== attempt) return;
+      const previous = { ...device };
+      for (const key of Object.values(audioOptions)) {
+        if (typeof settings[key] === "boolean") previous[key] = settings[key];
+      }
+      stream = await navigator.mediaDevices.getUserMedia({ audio: previous });
+    }
+    const replacement = stream.getAudioTracks()[0];
+    if (token !== attempt || localStream?.getAudioTracks()[0] !== track) {
+      stream.getTracks().forEach((item) => item.stop());
+      return;
+    }
+    replacement.enabled = micOn;
+    await replaceLocalTrack("audio", replacement, true);
+    return replacement;
+  }
+
   function applyAudioProcessing() {
     const token = attempt;
     const revision = ++audioProcessingRevision;
@@ -365,7 +393,26 @@
       try { await track.applyConstraints(constraints); }
       catch { failed = true; }
       if (token !== attempt || revision !== audioProcessingRevision || localStream?.getAudioTracks()[0] !== track) return;
-      const settings = track.getSettings();
+      let settings = track.getSettings();
+      const matches = () => Object.values(audioOptions).every((key) =>
+        !constraints[key] || settings[key] === constraints[key].exact);
+      if ((failed || !matches()) && localSenders.audio) {
+        // Chrome can keep the original audio processing after applyConstraints.
+        // A new capture configures its audio processor before replacing the sender track.
+        let replacement;
+        try {
+          replacement = await recaptureMicrophone(track, constraints, token);
+          if (!replacement) return;
+          if (token !== attempt || revision !== audioProcessingRevision) return;
+          settings = replacement.getSettings();
+          failed = !matches();
+        } catch (error) {
+          replacement?.stop();
+          console.warn("audio processing capture failed", error.name);
+          failed = true;
+        }
+      }
+      if (token !== attempt || revision !== audioProcessingRevision) return;
       for (const [id, key] of Object.entries(audioOptions)) {
         if (el[id].disabled) continue;
         if (typeof settings[key] === "boolean") {
@@ -676,7 +723,7 @@
     status(message);
   }
 
-  async function replaceLocalTrack(kind, track) {
+  async function replaceLocalTrack(kind, track, audioProcessingApplied = false) {
     const connection = pc;
     const sender = localSenders[kind];
     if (!sender) { track.stop(); throw new Error("Не найден медиаканал"); }
@@ -690,7 +737,7 @@
     if (old) { localStream.removeTrack(old); old.stop(); }
     localStream ||= new MediaStream();
     localStream.addTrack(track);
-    if (kind === "audio") await applyAudioProcessing();
+    if (kind === "audio" && !audioProcessingApplied) await applyAudioProcessing();
     if (pc !== connection) return;
     if (kind === "video") cameraTrack = track;
     stopAnalysis("local");

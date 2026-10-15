@@ -175,8 +175,7 @@ test("Group call: late join, camera replacement, bitrate, screen, mute, leave an
       await mobile.locator(`#${id}`).click();
       await mobile.waitForFunction(({ id, key }) => {
         const actual = window.testConnections.at(-1).getSenders().find((sender) => sender.track?.kind === "audio").track.getSettings()[key];
-        return document.getElementById(id).checked === actual &&
-          (actual === false || document.getElementById("toast").textContent.includes("не смог применить"));
+        return document.getElementById(id).checked === false && actual === false;
       }, { id, key });
       assert.equal(await mobile.evaluate(({ id, key }) => JSON.parse(localStorage.getItem("sozvon.prefs"))[key] === document.getElementById(id).checked, { id, key }), true);
     }
